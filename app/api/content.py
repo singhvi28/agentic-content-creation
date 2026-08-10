@@ -7,9 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Job, JobStatus
+from app.campaign_pack import build_campaign_platforms
+from app.config import get_settings
+from app.db.models import Job, JobStatus, JobType
 from app.db.session import get_db
+from app.platforms import get_preset
 from app.schemas import (
+    CampaignAssetOut,
     ContentVersionOut,
     FeedbackRequest,
     FeedbackResponse,
@@ -20,7 +24,6 @@ from app.schemas import (
 from app.services.bandit_service import record_feedback
 from app.services.events import hub
 from app.worker.tasks import redis_settings_from_url
-from app.config import get_settings
 
 router = APIRouter(prefix="/content", tags=["content"])
 
@@ -41,18 +44,68 @@ async def close_arq_pool() -> None:
         _arq_pool = None
 
 
+def _latest_assets(job: Job) -> list[CampaignAssetOut]:
+    by_platform: dict[str, object] = {}
+    for v in sorted(job.versions, key=lambda x: x.round):
+        if v.platform is None:
+            continue
+        by_platform[v.platform.value] = v
+    assets: list[CampaignAssetOut] = []
+    for platform, v in by_platform.items():
+        assets.append(
+            CampaignAssetOut(
+                platform=platform,
+                version_id=v.id,
+                text=v.text,
+                critic_score=v.critic_score,
+                critic_notes=v.critic_notes,
+                bandit_action=v.bandit_action,
+            )
+        )
+    return assets
+
+
+def _campaign_pack_markdown(job: Job, assets: list[CampaignAssetOut]) -> str:
+    parts = ["# Campaign pack", ""]
+    if job.shared_plan:
+        parts.extend(["## Shared plan", job.shared_plan, ""])
+    for asset in assets:
+        label = get_preset(asset.platform).label
+        parts.extend([f"## {label}", asset.text, ""])
+    if job.cross_surface_notes:
+        parts.extend(
+            [
+                "## Cross-surface review",
+                f"Score: {job.cross_surface_score}",
+                job.cross_surface_notes,
+            ]
+        )
+    return "\n".join(parts).strip()
+
+
 @router.post("/generate", response_model=GenerateResponse)
 async def generate_content(
     body: GenerateRequest,
     db: AsyncSession = Depends(get_db),
 ) -> GenerateResponse:
-    job = Job(
-        brief=body.brief,
-        platform=body.platform,
-        status=JobStatus.queued,
-    )
+    if body.job_type == JobType.campaign:
+        platforms = build_campaign_platforms(body.include_newsletter)
+        job = Job(
+            brief=body.brief,
+            job_type=JobType.campaign,
+            platform=None,
+            platforms=platforms,
+            status=JobStatus.queued,
+        )
+    else:
+        job = Job(
+            brief=body.brief,
+            job_type=JobType.single,
+            platform=body.platform,
+            platforms=None,
+            status=JobStatus.queued,
+        )
     db.add(job)
-    # Commit before enqueue so the worker can load the row.
     await db.commit()
     await db.refresh(job)
 
@@ -77,8 +130,13 @@ async def get_job(
         raise HTTPException(status_code=404, detail="Job not found")
 
     versions = [ContentVersionOut.model_validate(v) for v in job.versions]
+    assets = _latest_assets(job)
+
     final_content = None
-    if job.final_content_id:
+    if job.job_type == JobType.campaign:
+        if job.status.value == "done":
+            final_content = _campaign_pack_markdown(job, assets)
+    elif job.final_content_id:
         for v in job.versions:
             if v.id == job.final_content_id:
                 final_content = v.text
@@ -88,8 +146,14 @@ async def get_job(
         job_id=job.id,
         status=job.status,
         brief=job.brief,
+        job_type=job.job_type,
         platform=job.platform,
+        platforms=job.platforms,
+        shared_plan=job.shared_plan,
+        cross_surface_score=job.cross_surface_score,
+        cross_surface_notes=job.cross_surface_notes,
         versions=versions,
+        assets=assets,
         final_content=final_content,
         error_message=job.error_message,
     )
@@ -110,9 +174,10 @@ async def submit_feedback(
         await record_feedback(
             db,
             job_id=job_id,
-            content_version_id=body.content_version_id,
             rating=body.rating,
             edited_text=body.edited_text,
+            scope=body.scope,
+            content_version_id=body.content_version_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -125,12 +190,10 @@ async def stream_job(websocket: WebSocket, job_id: uuid.UUID) -> None:
     await websocket.accept()
     await hub.subscribe(job_id, websocket)
     try:
-        # Send current snapshot if available
         await websocket.send_json(
             {"job_id": str(job_id), "status": "subscribed"}
         )
         while True:
-            # Keep connection alive; client may send pings
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass

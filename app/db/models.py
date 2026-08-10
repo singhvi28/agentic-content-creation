@@ -35,6 +35,16 @@ class JobStatus(str, enum.Enum):
     failed = "failed"
 
 
+class JobType(str, enum.Enum):
+    single = "single"
+    campaign = "campaign"
+
+
+class FeedbackScope(str, enum.Enum):
+    asset = "asset"
+    pack = "pack"
+
+
 class Platform(str, enum.Enum):
     linkedin = "linkedin"
     twitter = "twitter"
@@ -60,11 +70,20 @@ class Job(Base):
         default=JobStatus.queued,
         nullable=False,
     )
-    brief: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[Platform] = mapped_column(
-        Enum(Platform, name="platform", native_enum=False),
+    job_type: Mapped[JobType] = mapped_column(
+        Enum(JobType, name="job_type", native_enum=False),
+        default=JobType.single,
         nullable=False,
     )
+    brief: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[Platform | None] = mapped_column(
+        Enum(Platform, name="platform", native_enum=False),
+        nullable=True,
+    )
+    platforms: Mapped[list | None] = mapped_column(JsonType, nullable=True)
+    shared_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cross_surface_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cross_surface_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -95,6 +114,10 @@ class ContentVersion(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("jobs.id"), nullable=False, index=True
     )
+    platform: Mapped[Platform | None] = mapped_column(
+        Enum(Platform, name="version_platform", native_enum=False),
+        nullable=True,
+    )
     round: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     critic_score: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -118,8 +141,13 @@ class Feedback(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("jobs.id"), nullable=False, index=True
     )
-    content_version_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("content_versions.id"), nullable=False
+    content_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("content_versions.id"), nullable=True
+    )
+    scope: Mapped[FeedbackScope] = mapped_column(
+        Enum(FeedbackScope, name="feedback_scope", native_enum=False),
+        default=FeedbackScope.asset,
+        nullable=False,
     )
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
     edited_text: Mapped[str | None] = mapped_column(Text, nullable=True)

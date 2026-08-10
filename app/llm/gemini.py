@@ -106,19 +106,38 @@ class FakeLLMClient:
     async def generate(self, prompt: str, *, temperature: float = 0.7) -> str:
         self.calls.append(("generate", prompt[:80]))
         lower = prompt.lower()
-        # Match plan-only prompts (not draft prompts that also include a plan section).
+        if "multi-platform campaign" in lower or "shared message plan" in lower:
+            return (
+                "1. Hook: ship faster with confidence\n"
+                "2. Key points: CI gates, feedback loops, ownership\n"
+                "3. Shared CTA: try one change this week\n"
+                "4. Proof: fewer regressions, faster PRs"
+            )
         if "numbered outline" in lower or (
             "content strategist" in lower and "no draft yet" in lower
         ):
             return "1. Hook\n2. Context\n3. Key points\n4. CTA"
         if "revising a draft" in lower or "editor feedback" in lower:
             return "Revised content: polished version addressing the feedback."
+        if "adapting a shared campaign plan" in lower:
+            return (
+                "Campaign asset draft adapted from the shared plan. "
+                "Clear hook and consistent CTA."
+            )
         return "Draft content based on the brief. Clear, useful, and complete."
 
     async def generate_json(
         self, prompt: str, *, temperature: float = 0.2
     ) -> dict:
         self.calls.append(("generate_json", prompt[:80]))
+        lower = prompt.lower()
+        if "brand consistency editor" in lower or "multi-platform content pack" in lower:
+            return {
+                "consistency": 8,
+                "hook_alignment": 8,
+                "cta_alignment": 8,
+                "notes": "Hook and CTA are aligned across surfaces; tighten Medium intro.",
+            }
         return {
             "coherence": 8,
             "on_topic": 8,

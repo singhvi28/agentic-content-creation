@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.bandit.thompson import PROMPT_STYLES, Arm, ThompsonSamplingBandit, expected_value
-from app.db.models import BanditState, ContentVersion, Feedback, Platform
+from app.db.models import (
+    BanditState,
+    ContentVersion,
+    Feedback,
+    FeedbackScope,
+    Job,
+    Platform,
+)
 from app.schemas import ArmStats
 
 
@@ -22,12 +30,22 @@ async def seed_bandit_arms(session: AsyncSession) -> None:
         if existing is None:
             session.add(BanditState(arm_id=arm_id, alpha=1.0, beta=1.0))
 
-    # Drop legacy arms from old content_type contexts (e.g. concise|blog_post)
     result = await session.execute(select(BanditState))
     for row in result.scalars().all():
         if row.arm_id not in expected_ids:
             await session.delete(row)
     await session.commit()
+
+
+async def _bump_arm(session: AsyncSession, arm_id: str, rating: int) -> None:
+    row = await session.get(BanditState, arm_id)
+    if row is None:
+        row = BanditState(arm_id=arm_id, alpha=1.0, beta=1.0)
+        session.add(row)
+        await session.flush()
+    row.alpha, row.beta = ThompsonSamplingBandit.update_from_rating(
+        row.alpha, row.beta, rating
+    )
 
 
 async def apply_feedback_to_bandit(
@@ -42,16 +60,28 @@ async def apply_feedback_to_bandit(
     arm_id = action.get("arm_id")
     if not arm_id:
         return
+    await _bump_arm(session, arm_id, rating)
 
-    row = await session.get(BanditState, arm_id)
-    if row is None:
-        row = BanditState(arm_id=arm_id, alpha=1.0, beta=1.0)
-        session.add(row)
-        await session.flush()
 
-    row.alpha, row.beta = ThompsonSamplingBandit.update_from_rating(
-        row.alpha, row.beta, rating
-    )
+async def apply_pack_feedback_to_bandit(
+    session: AsyncSession,
+    job: Job,
+    rating: int,
+) -> None:
+    """Update every arm used by the latest asset per platform."""
+    arm_ids: set[str] = set()
+    # Latest version per platform
+    by_platform: dict[str, ContentVersion] = {}
+    for v in sorted(job.versions, key=lambda x: (x.round, str(x.created_at))):
+        key = v.platform.value if v.platform else None
+        if key:
+            by_platform[key] = v
+    for v in by_platform.values():
+        arm_id = (v.bandit_action or {}).get("arm_id")
+        if arm_id:
+            arm_ids.add(arm_id)
+    for arm_id in arm_ids:
+        await _bump_arm(session, arm_id, rating)
 
 
 async def get_bandit_stats(session: AsyncSession) -> list[ArmStats]:
@@ -81,10 +111,36 @@ async def get_bandit_stats(session: AsyncSession) -> list[ArmStats]:
 async def record_feedback(
     session: AsyncSession,
     job_id,
-    content_version_id,
     rating: int,
     edited_text: str | None,
+    scope: FeedbackScope = FeedbackScope.asset,
+    content_version_id=None,
 ) -> Feedback:
+    result = await session.execute(
+        select(Job)
+        .where(Job.id == job_id)
+        .options(selectinload(Job.versions))
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise ValueError("job not found")
+
+    if scope == FeedbackScope.pack:
+        fb = Feedback(
+            job_id=job_id,
+            content_version_id=None,
+            scope=FeedbackScope.pack,
+            rating=rating,
+            edited_text=edited_text,
+        )
+        session.add(fb)
+        await apply_pack_feedback_to_bandit(session, job, rating)
+        await session.commit()
+        await session.refresh(fb)
+        return fb
+
+    if content_version_id is None:
+        raise ValueError("content_version_id is required for asset feedback")
     version = await session.get(ContentVersion, content_version_id)
     if version is None or version.job_id != job_id:
         raise ValueError("content_version does not belong to this job")
@@ -92,6 +148,7 @@ async def record_feedback(
     fb = Feedback(
         job_id=job_id,
         content_version_id=content_version_id,
+        scope=FeedbackScope.asset,
         rating=rating,
         edited_text=edited_text,
     )

@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.bandit.thompson import Arm, ArmParams, ThompsonSamplingBandit
 from app.config import get_settings
-from app.db.models import BanditState, ContentVersion, Job, JobStatus
+from app.db.models import BanditState, ContentVersion, Job, JobStatus, JobType, Platform
 from app.llm.gemini import LLMClient
 from app.orchestrator.evaluator import critique_draft
 from app.orchestrator.prompts import draft_prompt, plan_prompt, revise_prompt
@@ -65,6 +65,7 @@ async def _soft_update_bandit(
     session: AsyncSession,
     arm_id: str,
     critic_score: float,
+    weight: float | None = None,
 ) -> None:
     settings = get_settings()
     row = await _ensure_arm_row(session, arm_id)
@@ -72,7 +73,7 @@ async def _soft_update_bandit(
         row.alpha,
         row.beta,
         critic_score,
-        weight=settings.critic_reward_weight,
+        weight=settings.critic_reward_weight if weight is None else weight,
         threshold=settings.critic_score_threshold,
     )
     await session.flush()
@@ -106,15 +107,18 @@ async def _critique_and_maybe_revise(
     version: ContentVersion,
     max_rounds: int,
     on_status: StatusCallback,
+    platform: str | None = None,
 ) -> ContentVersion:
     settings = get_settings()
-    platform = job.platform.value
+    plat = platform or (job.platform.value if job.platform else None)
+    if not plat:
+        raise ValueError("platform required for critique loop")
     current_draft = draft
     current_version = version
 
     for rev_round in range(1, max_rounds + 1):
         await _set_status(session, job, JobStatus.critiquing, on_status)
-        critique = await critique_draft(llm, job.brief, platform, current_draft)
+        critique = await critique_draft(llm, job.brief, plat, current_draft)
 
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
@@ -124,6 +128,7 @@ async def _critique_and_maybe_revise(
             job.id,
             JobStatus.critiquing,
             {
+                "platform": plat,
                 "round": current_version.round,
                 "critic_score": critique.critic_score,
                 "critic_notes": critique.critic_notes,
@@ -136,12 +141,13 @@ async def _critique_and_maybe_revise(
         await _set_status(session, job, JobStatus.revising, on_status)
         current_draft = await llm.generate(
             revise_prompt(
-                job.brief, current_draft, critique.critic_notes, platform=platform
+                job.brief, current_draft, critique.critic_notes, platform=plat
             ),
             temperature=float(action["temperature"]),
         )
         current_version = ContentVersion(
             job_id=job.id,
+            platform=Platform(plat),
             round=rev_round,
             text=current_draft,
             bandit_action=action,
@@ -153,6 +159,7 @@ async def _critique_and_maybe_revise(
             job.id,
             JobStatus.revising,
             {
+                "platform": plat,
                 "version_id": str(current_version.id),
                 "round": rev_round,
                 "text": current_draft,
@@ -161,7 +168,7 @@ async def _critique_and_maybe_revise(
 
     if current_version.critic_score is None:
         await _set_status(session, job, JobStatus.critiquing, on_status)
-        critique = await critique_draft(llm, job.brief, platform, current_draft)
+        critique = await critique_draft(llm, job.brief, plat, current_draft)
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
         await _soft_update_bandit(session, arm.arm_id, critique.critic_score)
@@ -191,6 +198,15 @@ async def run_pipeline(
         raise ValueError(f"Job {job_id} not found")
 
     try:
+        if job.job_type == JobType.campaign:
+            from app.orchestrator.campaign import run_campaign_pipeline
+
+            await run_campaign_pipeline(session, job, llm, bandit, on_status)
+            return
+
+        if job.platform is None:
+            raise ValueError("Single job requires platform")
+
         platform = job.platform.value
         params = await _load_bandit_params(session, platform)
         arm = bandit.select_arm(platform, params)
@@ -212,6 +228,7 @@ async def run_pipeline(
 
         version = ContentVersion(
             job_id=job.id,
+            platform=job.platform,
             round=0,
             text=draft,
             bandit_action=action,
@@ -238,6 +255,7 @@ async def run_pipeline(
             version,
             max_rounds,
             on_status,
+            platform=platform,
         )
 
         job.final_content_id = final_version.id

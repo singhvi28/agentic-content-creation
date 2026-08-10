@@ -41,12 +41,12 @@ def post_json(path: str, body: dict) -> dict:
 
 def poll_job(job_id: str, status_box, progress) -> dict:
     detail: dict = {}
-    for i in range(120):
+    for i in range(180):
         detail = get_json(f"/content/{job_id}")
         status = detail.get("status", "unknown")
         n_versions = len(detail.get("versions") or [])
         status_box.info(f"Status: **{status}** · versions: {n_versions}")
-        progress.progress(min(1.0, (i + 1) / 120))
+        progress.progress(min(1.0, (i + 1) / 180))
         if status in TERMINAL:
             break
         time.sleep(2)
@@ -56,21 +56,40 @@ def poll_job(job_id: str, status_box, progress) -> dict:
 
 def page_generate() -> None:
     st.subheader("Generate content")
-    platform_label = st.selectbox("Platform", list(PLATFORMS.keys()))
+    mode = st.radio("Mode", ["Single platform", "Campaign pack"], horizontal=True)
+
     brief = st.text_area(
         "Brief",
         height=140,
         placeholder="e.g. Write about shipping faster with CI…",
     )
+
+    platform_label = None
+    include_newsletter = False
+    if mode == "Single platform":
+        platform_label = st.selectbox("Platform", list(PLATFORMS.keys()))
+    else:
+        st.caption(
+            "Default pack: Medium, YouTube script, X thread, LinkedIn. "
+            "Optional newsletter teaser."
+        )
+        include_newsletter = st.checkbox("Include newsletter teaser", value=False)
+
     if st.button("Generate", type="primary", disabled=not brief.strip()):
         try:
-            created = post_json(
-                "/content/generate",
-                {
+            if mode == "Campaign pack":
+                body = {
                     "brief": brief.strip(),
+                    "job_type": "campaign",
+                    "include_newsletter": include_newsletter,
+                }
+            else:
+                body = {
+                    "brief": brief.strip(),
+                    "job_type": "single",
                     "platform": PLATFORMS[platform_label],
-                },
-            )
+                }
+            created = post_json("/content/generate", body)
         except httpx.HTTPError as exc:
             st.error(f"Failed to enqueue job: {exc}")
             return
@@ -81,7 +100,7 @@ def page_generate() -> None:
 
         status_box = st.empty()
         progress = st.progress(0.0)
-        with st.spinner("Running Plan → Draft → Critique → Revise…"):
+        with st.spinner("Running pipeline…"):
             try:
                 detail = poll_job(job_id, status_box, progress)
             except httpx.HTTPError as exc:
@@ -95,16 +114,43 @@ def page_generate() -> None:
 
     st.divider()
     status = detail.get("status")
-    platform = detail.get("platform", "?")
+    job_type = detail.get("job_type", "single")
     st.markdown(
-        f"**Job** `{detail.get('job_id')}` · **{status}** · platform=`{platform}`"
+        f"**Job** `{detail.get('job_id')}` · **{status}** · type=`{job_type}`"
     )
 
     if status == "failed":
         st.error(detail.get("error_message") or "Job failed")
         return
 
-    if detail.get("final_content"):
+    if detail.get("shared_plan"):
+        st.markdown("#### Shared plan")
+        st.text_area(
+            "shared_plan",
+            value=detail["shared_plan"],
+            height=140,
+            label_visibility="collapsed",
+        )
+
+    if detail.get("cross_surface_score") is not None:
+        st.markdown(
+            f"**Cross-surface score:** {detail['cross_surface_score']} — "
+            f"{detail.get('cross_surface_notes') or ''}"
+        )
+
+    assets = detail.get("assets") or []
+    if assets:
+        st.markdown("#### Campaign assets")
+        for asset in assets:
+            with st.expander(
+                f"{asset['platform']} · critic={asset.get('critic_score')}",
+                expanded=True,
+            ):
+                st.write(asset.get("text") or "")
+                if asset.get("critic_notes"):
+                    st.caption(asset["critic_notes"])
+
+    if detail.get("final_content") and not assets:
         st.markdown("#### Final content")
         st.text_area(
             "final",
@@ -114,7 +160,7 @@ def page_generate() -> None:
         )
 
     versions = detail.get("versions") or []
-    if versions:
+    if versions and not assets:
         st.markdown("#### Versions")
         for v in versions:
             action = v.get("bandit_action") or {}
@@ -128,7 +174,42 @@ def page_generate() -> None:
                 if v.get("critic_notes"):
                     st.caption(v["critic_notes"])
 
-        st.markdown("#### Feedback")
+    # Feedback
+    st.markdown("#### Feedback")
+    if assets:
+        asset_options = {
+            f"{a['platform']} ({a['version_id'][:8]}…)": a["version_id"]
+            for a in assets
+        }
+        choice = st.selectbox("Asset to rate", list(asset_options.keys()))
+        rating = st.slider("Asset rating", min_value=1, max_value=5, value=4, key="asset_rating")
+        if st.button("Submit asset feedback"):
+            try:
+                post_json(
+                    f"/content/{detail['job_id']}/feedback",
+                    {
+                        "scope": "asset",
+                        "content_version_id": asset_options[choice],
+                        "rating": rating,
+                    },
+                )
+                st.success("Asset feedback recorded.")
+            except httpx.HTTPError as exc:
+                st.error(f"Feedback failed: {exc}")
+
+        pack_rating = st.slider(
+            "Pack rating", min_value=1, max_value=5, value=4, key="pack_rating"
+        )
+        if st.button("Submit pack feedback"):
+            try:
+                post_json(
+                    f"/content/{detail['job_id']}/feedback",
+                    {"scope": "pack", "rating": pack_rating},
+                )
+                st.success("Pack feedback recorded — all used arms updated.")
+            except httpx.HTTPError as exc:
+                st.error(f"Feedback failed: {exc}")
+    elif versions:
         options = {
             f"Round {v['round']} ({v['id'][:8]}…)": v["id"] for v in versions
         }
@@ -140,6 +221,7 @@ def page_generate() -> None:
                 post_json(
                     f"/content/{detail['job_id']}/feedback",
                     {
+                        "scope": "asset",
                         "content_version_id": options[choice],
                         "rating": rating,
                         "edited_text": edited.strip() or None,
@@ -187,7 +269,7 @@ def main() -> None:
     )
     st.title("Agentic Content Pipeline")
     st.caption(
-        "Plan → Draft → Critique → Revise · Thompson Sampling over style × platform"
+        "Single platforms or campaign packs · Thompson Sampling over style × platform"
     )
 
     with st.sidebar:

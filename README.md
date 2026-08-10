@@ -9,6 +9,10 @@ Supported platforms: LinkedIn, X/Twitter, Medium, YouTube script, newsletter,
 Instagram caption, Threads — each with length caps, tone, CTA, hashtag, and
 formatting presets.
 
+Also supports **campaign packs**: one brief → shared plan → Medium + YouTube
+script + X thread + LinkedIn (+ optional newsletter), with a cross-surface
+consistency critic and pack-level feedback.
+
 > **LLM note:** The original SPEC suggested Anthropic Claude. This implementation
 > supports **Cursor SDK** (`CURSOR_API_KEY`, default when set) and **Google Gemini**
 > (`GEMINI_API_KEY`). Set `LLM_PROVIDER=cursor|gemini|auto|fake`.
@@ -96,21 +100,37 @@ arq app.worker.tasks.WorkerSettings
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/content/generate` | Enqueue generation (`brief`, `platform`) |
-| `GET` | `/content/{job_id}` | Job status, versions, final content |
+| `POST` | `/content/generate` | Enqueue single or campaign job |
+| `GET` | `/content/{job_id}` | Job status, versions, assets, final content |
 | `WS` | `/content/{job_id}/stream` | Status + draft events |
-| `POST` | `/content/{job_id}/feedback` | Rating 1–5 → bandit update |
+| `POST` | `/content/{job_id}/feedback` | Asset or pack rating → bandit update |
 | `GET` | `/bandit/stats` | α/β (and mean) per arm |
 | `GET` | `/health` | Liveness |
 
 `platform` values: `linkedin`, `twitter`, `medium`, `youtube_script`, `newsletter`, `instagram`, `threads`.
 
-Example:
+Single example:
 
 ```bash
 curl -s -X POST http://localhost:8000/content/generate \
   -H 'Content-Type: application/json' \
-  -d '{"brief":"Write about shipping faster with CI","platform":"linkedin"}'
+  -d '{"brief":"Write about shipping faster with CI","job_type":"single","platform":"linkedin"}'
+```
+
+Campaign example (default pack + optional newsletter):
+
+```bash
+curl -s -X POST http://localhost:8000/content/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"brief":"Ship faster with better CI","job_type":"campaign","include_newsletter":true}'
+```
+
+Pack feedback:
+
+```bash
+curl -s -X POST http://localhost:8000/content/{job_id}/feedback \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"pack","rating":5}'
 ```
 
 ---
@@ -169,7 +189,7 @@ tests/
 
 Honest stretch, not built here:
 
-- Multi-platform campaign packs (one brief → LinkedIn + thread + Medium)
+- Multi-platform campaign packs are implemented (shared plan + per-platform drafts + cross-surface critic)
 - Multi-dimensional arms (`temperature`, `revision_rounds`) or LinUCB
 - PPO/DPO / preference training offline (separate from online bandit)
 - Vector DB / RAG for brand voice and prior examples

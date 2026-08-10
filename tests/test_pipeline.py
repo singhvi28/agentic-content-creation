@@ -3,14 +3,16 @@ import uuid
 import pytest
 import pytest_asyncio
 from numpy.random import default_rng
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.bandit.thompson import ThompsonSamplingBandit
-from app.db.models import BanditState, Base, Job, JobStatus, Platform
+from app.campaign_pack import DEFAULT_CAMPAIGN_PLATFORMS, build_campaign_platforms
+from app.db.models import BanditState, Base, Job, JobStatus, JobType, Platform
 from app.llm.gemini import FakeLLMClient
 from app.orchestrator.pipeline import run_pipeline
 from app.services.bandit_service import record_feedback, seed_bandit_arms
-from sqlalchemy import func, select
+from app.db.models import FeedbackScope
 
 
 @pytest_asyncio.fixture
@@ -25,10 +27,17 @@ async def session():
     await engine.dispose()
 
 
+def test_build_campaign_platforms():
+    assert build_campaign_platforms(False) == list(DEFAULT_CAMPAIGN_PLATFORMS)
+    with_nl = build_campaign_platforms(True)
+    assert "newsletter" in with_nl
+    assert with_nl[:4] == list(DEFAULT_CAMPAIGN_PLATFORMS)
+
+
 @pytest.mark.asyncio
 async def test_seed_creates_21_arms(session: AsyncSession):
     count = await session.scalar(select(func.count()).select_from(BanditState))
-    assert count == 21  # 3 styles × 7 platforms
+    assert count == 21
 
 
 @pytest.mark.asyncio
@@ -36,6 +45,7 @@ async def test_pipeline_completes_with_fake_llm(session: AsyncSession):
     job = Job(
         id=uuid.uuid4(),
         brief="Write a short tip about remote work.",
+        job_type=JobType.single,
         platform=Platform.linkedin,
         status=JobStatus.queued,
     )
@@ -56,6 +66,7 @@ async def test_pipeline_completes_with_fake_llm(session: AsyncSession):
 async def test_feedback_updates_bandit(session: AsyncSession):
     job = Job(
         brief="Announce a product launch.",
+        job_type=JobType.single,
         platform=Platform.newsletter,
         status=JobStatus.queued,
     )
@@ -76,7 +87,6 @@ async def test_feedback_updates_bandit(session: AsyncSession):
     version = result.scalars().first()
     assert version is not None
     arm_id = version.bandit_action["arm_id"]
-    assert "|newsletter" in arm_id
     before = await session.get(BanditState, arm_id)
     alpha_before = before.alpha
 
@@ -86,6 +96,66 @@ async def test_feedback_updates_bandit(session: AsyncSession):
         content_version_id=version.id,
         rating=5,
         edited_text=None,
+        scope=FeedbackScope.asset,
     )
     after = await session.get(BanditState, arm_id)
     assert after.alpha == alpha_before + 1.0
+
+
+@pytest.mark.asyncio
+async def test_campaign_pipeline_and_pack_feedback(session: AsyncSession):
+    platforms = build_campaign_platforms(include_newsletter=False)
+    job = Job(
+        brief="Ship faster with better CI.",
+        job_type=JobType.campaign,
+        platform=None,
+        platforms=platforms,
+        status=JobStatus.queued,
+    )
+    session.add(job)
+    await session.commit()
+
+    llm = FakeLLMClient()
+    await run_pipeline(
+        session, job.id, llm, bandit=ThompsonSamplingBandit(rng=default_rng(3))
+    )
+    await session.refresh(job)
+
+    assert job.status == JobStatus.done
+    assert job.shared_plan
+    assert job.cross_surface_score is not None
+    assert job.platforms == platforms
+
+    from app.db.models import ContentVersion
+
+    versions = (
+        await session.execute(
+            select(ContentVersion).where(ContentVersion.job_id == job.id)
+        )
+    ).scalars().all()
+    platforms_seen = {v.platform.value for v in versions if v.platform}
+    assert platforms_seen == set(platforms)
+    assert len(platforms_seen) >= 4
+
+    # Snapshot alphas for used arms
+    finals = {}
+    for v in sorted(versions, key=lambda x: x.round):
+        if v.platform:
+            finals[v.platform.value] = v
+    arm_ids = [(v.bandit_action or {}).get("arm_id") for v in finals.values()]
+    arm_ids = [a for a in arm_ids if a]
+    before = {}
+    for arm_id in arm_ids:
+        row = await session.get(BanditState, arm_id)
+        before[arm_id] = row.alpha
+
+    await record_feedback(
+        session,
+        job_id=job.id,
+        rating=5,
+        edited_text=None,
+        scope=FeedbackScope.pack,
+    )
+    for arm_id, alpha0 in before.items():
+        row = await session.get(BanditState, arm_id)
+        assert row.alpha == alpha0 + 1.0

@@ -86,4 +86,4 @@ class WorkerSettings:
     on_shutdown = on_shutdown
     redis_settings = redis_settings_from_url(get_settings().redis_url)
     max_jobs = 2  # Cursor agent runs are heavier than Gemini calls
-    job_timeout = 1800
+    job_timeout = 3600  # campaigns run multiple LLM passes sequentially

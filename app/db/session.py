@@ -34,38 +34,76 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def _migrate_content_type_to_platform(conn) -> None:
-    """One-shot: rename jobs.content_type → platform when upgrading old DBs."""
+async def _column_names(conn, table: str) -> set[str]:
     dialect = conn.dialect.name
     if dialect == "postgresql":
-        exists = await conn.scalar(
+        result = await conn.execute(
             text(
                 """
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'jobs' AND column_name = 'content_type'
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = :table
                 """
-            )
+            ),
+            {"table": table},
         )
-        platform_exists = await conn.scalar(
+        return {row[0] for row in result.fetchall()}
+    if dialect == "sqlite":
+        result = await conn.execute(text(f"PRAGMA table_info({table})"))
+        return {row[1] for row in result.fetchall()}
+    return set()
+
+
+async def _migrate_content_type_to_platform(conn) -> None:
+    """One-shot: rename jobs.content_type → platform when upgrading old DBs."""
+    cols = await _column_names(conn, "jobs")
+    if "content_type" in cols and "platform" not in cols:
+        await conn.execute(
+            text("ALTER TABLE jobs RENAME COLUMN content_type TO platform")
+        )
+
+
+async def _add_column_if_missing(
+    conn, table: str, column: str, ddl_type: str
+) -> None:
+    cols = await _column_names(conn, table)
+    if column in cols:
+        return
+    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+
+async def _migrate_campaign_columns(conn) -> None:
+    dialect = conn.dialect.name
+    # Jobs table campaign fields
+    await _add_column_if_missing(conn, "jobs", "job_type", "VARCHAR(32) DEFAULT 'single'")
+    await _add_column_if_missing(conn, "jobs", "platforms", "JSON" if dialect != "postgresql" else "JSONB")
+    await _add_column_if_missing(conn, "jobs", "shared_plan", "TEXT")
+    await _add_column_if_missing(conn, "jobs", "cross_surface_score", "FLOAT")
+    await _add_column_if_missing(conn, "jobs", "cross_surface_notes", "TEXT")
+
+    # Make platform nullable (Postgres)
+    if dialect == "postgresql":
+        await conn.execute(
+            text("ALTER TABLE jobs ALTER COLUMN platform DROP NOT NULL")
+        )
+        await conn.execute(
             text(
-                """
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'jobs' AND column_name = 'platform'
-                """
+                "UPDATE jobs SET job_type = 'single' WHERE job_type IS NULL OR job_type = ''"
             )
         )
-        if exists and not platform_exists:
-            await conn.execute(
-                text("ALTER TABLE jobs RENAME COLUMN content_type TO platform")
-            )
-    elif dialect == "sqlite":
-        # SQLite: inspect via PRAGMA
-        result = await conn.execute(text("PRAGMA table_info(jobs)"))
-        cols = {row[1] for row in result.fetchall()}
-        if "content_type" in cols and "platform" not in cols:
-            await conn.execute(
-                text("ALTER TABLE jobs RENAME COLUMN content_type TO platform")
-            )
+
+    # Content versions: platform tag
+    await _add_column_if_missing(
+        conn, "content_versions", "platform", "VARCHAR(64)"
+    )
+
+    # Feedback: nullable version + scope
+    await _add_column_if_missing(
+        conn, "feedback", "scope", "VARCHAR(32) DEFAULT 'asset'"
+    )
+    if dialect == "postgresql":
+        await conn.execute(
+            text("ALTER TABLE feedback ALTER COLUMN content_version_id DROP NOT NULL")
+        )
 
 
 async def init_db() -> None:
@@ -74,3 +112,4 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _migrate_content_type_to_platform(conn)
+        await _migrate_campaign_columns(conn)

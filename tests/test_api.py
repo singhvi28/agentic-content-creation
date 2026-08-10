@@ -6,7 +6,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.db.models import Base, Job, JobStatus
+from app.db.models import Base
 from app.db.session import get_db
 from app.llm.gemini import FakeLLMClient
 from app.main import app
@@ -16,9 +16,8 @@ from app.services.bandit_service import seed_bandit_arms
 
 @pytest_asyncio.fixture
 async def client():
-    # Shared in-memory DB so enqueue's separate session can see the committed job.
     engine = create_async_engine(
-        "sqlite+aiosqlite:///file:apitest?mode=memory&cache=shared",
+        "sqlite+aiosqlite:///file:apitest_campaign?mode=memory&cache=shared",
         connect_args={"uri": True},
     )
     async with engine.begin() as conn:
@@ -39,11 +38,11 @@ async def client():
 
     app.dependency_overrides[get_db] = override_get_db
 
-    # Avoid real Redis / Arq / Gemini during API tests
     async def fake_enqueue(job_id: str):
         async with factory() as session:
-            from app.bandit.thompson import ThompsonSamplingBandit
             from numpy.random import default_rng
+
+            from app.bandit.thompson import ThompsonSamplingBandit
 
             await run_pipeline(
                 session,
@@ -89,6 +88,7 @@ async def test_generate_poll_feedback_flow(client):
         "/content/generate",
         json={
             "brief": "Write a Medium intro about async Python.",
+            "job_type": "single",
             "platform": "medium",
         },
     )
@@ -102,17 +102,55 @@ async def test_generate_poll_feedback_flow(client):
     body = detail.json()
     assert body["status"] == "done"
     assert body["platform"] == "medium"
+    assert body["job_type"] == "single"
     assert body["final_content"]
     assert len(body["versions"]) >= 1
 
     version_id = body["versions"][0]["id"]
     fb = await client.post(
         f"/content/{job_id}/feedback",
-        json={"content_version_id": version_id, "rating": 5},
+        json={"scope": "asset", "content_version_id": version_id, "rating": 5},
     )
     assert fb.status_code == 200
     assert fb.json()["ok"] is True
 
     stats = await client.get("/bandit/stats")
     assert stats.status_code == 200
-    assert len(stats.json()["arms"]) == 21  # 3 styles × 7 platforms
+    assert len(stats.json()["arms"]) == 21
+
+
+@pytest.mark.asyncio
+async def test_campaign_generate_flow(client):
+    r = await client.post(
+        "/content/generate",
+        json={
+            "brief": "Campaign about async Python for builders.",
+            "job_type": "campaign",
+            "include_newsletter": True,
+        },
+    )
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+
+    detail = await client.get(f"/content/{job_id}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["status"] == "done"
+    assert body["job_type"] == "campaign"
+    assert body["shared_plan"]
+    assert body["cross_surface_score"] is not None
+    assert "newsletter" in (body.get("platforms") or [])
+    assert len(body.get("assets") or []) >= 4
+
+    pack_fb = await client.post(
+        f"/content/{job_id}/feedback",
+        json={"scope": "pack", "rating": 5},
+    )
+    assert pack_fb.status_code == 200
+
+    asset_id = body["assets"][0]["version_id"]
+    asset_fb = await client.post(
+        f"/content/{job_id}/feedback",
+        json={"scope": "asset", "content_version_id": asset_id, "rating": 4},
+    )
+    assert asset_fb.status_code == 200

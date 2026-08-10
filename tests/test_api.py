@@ -6,7 +6,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.db.models import Base, ContentType, Job, JobStatus
+from app.db.models import Base, Job, JobStatus
 from app.db.session import get_db
 from app.llm.gemini import FakeLLMClient
 from app.main import app
@@ -88,8 +88,8 @@ async def test_generate_poll_feedback_flow(client):
     r = await client.post(
         "/content/generate",
         json={
-            "brief": "Write a blog intro about async Python.",
-            "content_type": "blog_post",
+            "brief": "Write a Medium intro about async Python.",
+            "platform": "medium",
         },
     )
     assert r.status_code == 200
@@ -101,6 +101,7 @@ async def test_generate_poll_feedback_flow(client):
     assert detail.status_code == 200
     body = detail.json()
     assert body["status"] == "done"
+    assert body["platform"] == "medium"
     assert body["final_content"]
     assert len(body["versions"]) >= 1
 
@@ -114,4 +115,4 @@ async def test_generate_poll_feedback_flow(client):
 
     stats = await client.get("/bandit/stats")
     assert stats.status_code == 200
-    assert len(stats.json()["arms"]) == 9  # 3 styles × 3 content types
+    assert len(stats.json()["arms"]) == 21  # 3 styles × 7 platforms

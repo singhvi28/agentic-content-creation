@@ -3,7 +3,11 @@
 FastAPI service that generates content through an explicit multi-step agent loop
 (**Plan → Draft → Critique → Revise → Finalize**). A **contextual Thompson Sampling
 bandit** chooses the prompt strategy (`concise` / `storytelling` / `data_driven`)
-per `content_type`, and user feedback updates the bandit so it improves over time.
+per **platform**, and user feedback updates the bandit so it improves over time.
+
+Supported platforms: LinkedIn, X/Twitter, Medium, YouTube script, newsletter,
+Instagram caption, Threads — each with length caps, tone, CTA, hashtag, and
+formatting presets.
 
 > **LLM note:** The original SPEC suggested Anthropic Claude. This implementation
 > supports **Cursor SDK** (`CURSOR_API_KEY`, default when set) and **Google Gemini**
@@ -30,9 +34,9 @@ Client
   │                                                         ▼
   │                                              Worker (Arq)
   │                                                │
-  │                                                ├─ Bandit.select_arm(content_type)
-  │                                                ├─ Gemini: plan + draft
-  │                                                ├─ Critic (Gemini rubric + Flesch + n-grams)
+  │                                                ├─ Bandit.select_arm(platform)
+  │                                                ├─ Plan + draft (platform preset)
+  │                                                ├─ Critic (rubric + Flesch + n-grams + length)
   │                                                ├─ Revise loop until score ≥ threshold
   │                                                └─ Persist versions + soft bandit update
   │
@@ -45,7 +49,7 @@ Client
 ### Bandit (Thompson Sampling)
 
 - **Arms:** `prompt_style ∈ {concise, storytelling, data_driven}`
-- **Context:** separate Beta posterior per `(prompt_style, content_type)`
+- **Context:** separate Beta posterior per `(prompt_style, platform)` — 21 arms
 - **Select:** sample `θ ~ Beta(α, β)`, pick `argmax`
 - **Human reward:** rating ≥ 4 → `α += 1`; ≤ 2 → `β += 1`; 3 → no-op
 - **Secondary reward:** automated critic score applies a fractional update
@@ -58,12 +62,12 @@ Client
 ### Prerequisites
 
 - Docker + Docker Compose, **or** local Postgres 16 + Redis 7 + Python 3.12
-- `GEMINI_API_KEY` in `.env`
+- `CURSOR_API_KEY` and/or `GEMINI_API_KEY` in `.env`
 
 ### With Docker Compose
 
 ```bash
-cp .env.example .env   # then set GEMINI_API_KEY
+cp .env.example .env   # then set API keys
 docker compose up --build
 ```
 
@@ -92,19 +96,21 @@ arq app.worker.tasks.WorkerSettings
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/content/generate` | Enqueue generation (`brief`, `content_type`) |
+| `POST` | `/content/generate` | Enqueue generation (`brief`, `platform`) |
 | `GET` | `/content/{job_id}` | Job status, versions, final content |
 | `WS` | `/content/{job_id}/stream` | Status + draft events |
 | `POST` | `/content/{job_id}/feedback` | Rating 1–5 → bandit update |
 | `GET` | `/bandit/stats` | α/β (and mean) per arm |
 | `GET` | `/health` | Liveness |
 
+`platform` values: `linkedin`, `twitter`, `medium`, `youtube_script`, `newsletter`, `instagram`, `threads`.
+
 Example:
 
 ```bash
 curl -s -X POST http://localhost:8000/content/generate \
   -H 'Content-Type: application/json' \
-  -d '{"brief":"Write a LinkedIn post about shipping faster with CI","content_type":"social_post"}'
+  -d '{"brief":"Write about shipping faster with CI","platform":"linkedin"}'
 ```
 
 ---
@@ -124,7 +130,7 @@ Default API URL: `http://127.0.0.1:8000` (changeable in the sidebar).
 
 ## Tests
 
-Tests mock the LLM — **no real Gemini calls in CI**.
+Tests mock the LLM — **no real Gemini/Cursor calls in CI**.
 
 ```bash
 pip install -r requirements.txt
@@ -134,9 +140,9 @@ pytest -q
 Coverage includes:
 
 - Seeded-RNG bandit unit tests (determinism, preference for high-α arms, reward updates)
-- Evaluator local metrics (Flesch mapping, n-gram repetition)
+- Evaluator local metrics (Flesch, n-gram repetition, platform length caps)
 - Orchestrator with `FakeLLMClient`
-- API flow: generate → poll → feedback → `/bandit/stats`
+- API flow: generate → poll → feedback → `/bandit/stats` (21 arms)
 
 ---
 
@@ -147,10 +153,13 @@ app/
   api/           # FastAPI routers
   bandit/        # Thompson Sampling (~150 lines)
   db/            # SQLAlchemy models + async session
-  llm/           # Gemini client + FakeLLMClient
+  llm/           # Cursor + Gemini clients + FakeLLMClient
   orchestrator/  # Pipeline state machine + evaluator + prompts
+  platforms.py   # Platform presets (caps, tone, CTA, format)
   services/      # Bandit persistence + Redis event hub
   worker/        # Arq tasks
+frontend/
+  streamlit_app.py
 tests/
 ```
 
@@ -160,6 +169,7 @@ tests/
 
 Honest stretch, not built here:
 
+- Multi-platform campaign packs (one brief → LinkedIn + thread + Medium)
 - Multi-dimensional arms (`temperature`, `revision_rounds`) or LinUCB
 - PPO/DPO / preference training offline (separate from online bandit)
 - Vector DB / RAG for brand voice and prior examples
@@ -173,5 +183,5 @@ Honest stretch, not built here:
 
 - Scoped to **pipeline-level** decisions, not token-level RL — deliberate given LLM rollout cost.
 - Thompson Sampling explores naturally and decays exploration as posteriors concentrate (vs ε-greedy).
-- Critic mixes **LLM rubric** with **free local signals** (Flesch, n-gram overlap).
+- Critic mixes **LLM rubric** with **free local signals** (Flesch, n-gram overlap, platform length).
 - Worker and API are separate processes; progress streams via **Redis pub/sub**.

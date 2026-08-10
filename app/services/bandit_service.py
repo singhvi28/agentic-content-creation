@@ -6,18 +6,27 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bandit.thompson import PROMPT_STYLES, Arm, ThompsonSamplingBandit, expected_value
-from app.db.models import BanditState, ContentType, ContentVersion, Feedback
+from app.db.models import BanditState, ContentVersion, Feedback, Platform
 from app.schemas import ArmStats
 
 
 async def seed_bandit_arms(session: AsyncSession) -> None:
-    """Ensure all (prompt_style, content_type) arms exist with Beta(1,1)."""
-    for ctype in ContentType:
-        for style in PROMPT_STYLES:
-            arm_id = Arm(style, ctype.value).arm_id
-            existing = await session.get(BanditState, arm_id)
-            if existing is None:
-                session.add(BanditState(arm_id=arm_id, alpha=1.0, beta=1.0))
+    """Ensure all (prompt_style, platform) arms exist with Beta(1,1)."""
+    expected_ids = {
+        Arm(style, platform.value).arm_id
+        for platform in Platform
+        for style in PROMPT_STYLES
+    }
+    for arm_id in expected_ids:
+        existing = await session.get(BanditState, arm_id)
+        if existing is None:
+            session.add(BanditState(arm_id=arm_id, alpha=1.0, beta=1.0))
+
+    # Drop legacy arms from old content_type contexts (e.g. concise|blog_post)
+    result = await session.execute(select(BanditState))
+    for row in result.scalars().all():
+        if row.arm_id not in expected_ids:
+            await session.delete(row)
     await session.commit()
 
 
@@ -32,7 +41,6 @@ async def apply_feedback_to_bandit(
     action = version.bandit_action or {}
     arm_id = action.get("arm_id")
     if not arm_id:
-        # Fallback: cannot update without arm
         return
 
     row = await session.get(BanditState, arm_id)
@@ -53,14 +61,14 @@ async def get_bandit_stats(session: AsyncSession) -> list[ArmStats]:
     for row in rows:
         try:
             arm = Arm.from_arm_id(row.arm_id)
-            style, ctype = arm.prompt_style, arm.content_type
+            style, platform = arm.prompt_style, arm.platform
         except ValueError:
-            style, ctype = row.arm_id, "unknown"
+            style, platform = row.arm_id, "unknown"
         stats.append(
             ArmStats(
                 arm_id=row.arm_id,
                 prompt_style=style,
-                content_type=ctype,
+                platform=platform,
                 alpha=row.alpha,
                 beta=row.beta,
                 mean=expected_value(row.alpha, row.beta),

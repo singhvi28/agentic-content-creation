@@ -1,11 +1,10 @@
-"""Thompson Sampling contextual bandit over prompt_style × content_type."""
+"""Thompson Sampling contextual bandit over prompt_style × platform."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Sequence
 
-import numpy as np
 from numpy.random import Generator, default_rng
 
 PROMPT_STYLES = ("concise", "storytelling", "data_driven")
@@ -18,22 +17,22 @@ DEFAULT_MAX_REVISION_ROUNDS = 2
 @dataclass(frozen=True)
 class Arm:
     prompt_style: str
-    content_type: str
+    platform: str
 
     @property
     def arm_id(self) -> str:
-        return f"{self.prompt_style}|{self.content_type}"
+        return f"{self.prompt_style}|{self.platform}"
 
     @classmethod
     def from_arm_id(cls, arm_id: str) -> Arm:
-        style, ctype = arm_id.split("|", 1)
-        return cls(prompt_style=style, content_type=ctype)
+        style, platform = arm_id.split("|", 1)
+        return cls(prompt_style=style, platform=platform)
 
     def to_action(self) -> dict:
         return {
             "arm_id": self.arm_id,
             "prompt_style": self.prompt_style,
-            "content_type": self.content_type,
+            "platform": self.platform,
             "temperature": DEFAULT_TEMPERATURE,
             "max_revision_rounds": DEFAULT_MAX_REVISION_ROUNDS,
         }
@@ -52,12 +51,12 @@ class ThompsonSamplingBandit:
     def __init__(self, rng: Generator | None = None) -> None:
         self.rng = rng if rng is not None else default_rng()
 
-    def all_arms_for_context(self, content_type: str) -> list[Arm]:
-        return [Arm(style, content_type) for style in PROMPT_STYLES]
+    def all_arms_for_context(self, platform: str) -> list[Arm]:
+        return [Arm(style, platform) for style in PROMPT_STYLES]
 
     def select_arm(
         self,
-        content_type: str,
+        platform: str,
         params: Sequence[ArmParams],
     ) -> Arm:
         """Sample θ ~ Beta(α, β) per arm; pick argmax."""
@@ -65,7 +64,7 @@ class ThompsonSamplingBandit:
         best_arm: Arm | None = None
         best_theta = -1.0
 
-        for arm in self.all_arms_for_context(content_type):
+        for arm in self.all_arms_for_context(platform):
             p = by_id.get(arm.arm_id)
             alpha = p.alpha if p else 1.0
             beta = p.beta if p else 1.0
@@ -100,7 +99,6 @@ class ThompsonSamplingBandit:
         """
         if critic_score >= threshold:
             return alpha + weight, beta
-        # Map shortfall into [0, weight]
         shortfall = min(1.0, (threshold - critic_score) / threshold)
         return alpha, beta + weight * shortfall
 

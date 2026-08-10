@@ -6,10 +6,11 @@ from numpy.random import default_rng
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.bandit.thompson import ThompsonSamplingBandit
-from app.db.models import Base, ContentType, Job, JobStatus
+from app.db.models import BanditState, Base, Job, JobStatus, Platform
 from app.llm.gemini import FakeLLMClient
 from app.orchestrator.pipeline import run_pipeline
 from app.services.bandit_service import record_feedback, seed_bandit_arms
+from sqlalchemy import func, select
 
 
 @pytest_asyncio.fixture
@@ -25,11 +26,17 @@ async def session():
 
 
 @pytest.mark.asyncio
+async def test_seed_creates_21_arms(session: AsyncSession):
+    count = await session.scalar(select(func.count()).select_from(BanditState))
+    assert count == 21  # 3 styles × 7 platforms
+
+
+@pytest.mark.asyncio
 async def test_pipeline_completes_with_fake_llm(session: AsyncSession):
     job = Job(
         id=uuid.uuid4(),
         brief="Write a short tip about remote work.",
-        content_type=ContentType.social_post,
+        platform=Platform.linkedin,
         status=JobStatus.queued,
     )
     session.add(job)
@@ -42,14 +49,14 @@ async def test_pipeline_completes_with_fake_llm(session: AsyncSession):
     await session.refresh(job)
     assert job.status == JobStatus.done
     assert job.final_content_id is not None
-    assert len(llm.calls) >= 2  # at least plan + draft
+    assert len(llm.calls) >= 2
 
 
 @pytest.mark.asyncio
 async def test_feedback_updates_bandit(session: AsyncSession):
     job = Job(
         brief="Announce a product launch.",
-        content_type=ContentType.email,
+        platform=Platform.newsletter,
         status=JobStatus.queued,
     )
     session.add(job)
@@ -61,8 +68,7 @@ async def test_feedback_updates_bandit(session: AsyncSession):
     )
     await session.refresh(job)
 
-    from sqlalchemy import select
-    from app.db.models import ContentVersion, BanditState
+    from app.db.models import ContentVersion
 
     result = await session.execute(
         select(ContentVersion).where(ContentVersion.job_id == job.id)
@@ -70,6 +76,7 @@ async def test_feedback_updates_bandit(session: AsyncSession):
     version = result.scalars().first()
     assert version is not None
     arm_id = version.bandit_action["arm_id"]
+    assert "|newsletter" in arm_id
     before = await session.get(BanditState, arm_id)
     alpha_before = before.alpha
 

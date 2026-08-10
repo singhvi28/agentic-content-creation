@@ -41,10 +41,10 @@ async def _set_status(
 
 
 async def _load_bandit_params(
-    session: AsyncSession, content_type: str
+    session: AsyncSession, platform: str
 ) -> list[ArmParams]:
     bandit = ThompsonSamplingBandit()
-    arm_ids = [a.arm_id for a in bandit.all_arms_for_context(content_type)]
+    arm_ids = [a.arm_id for a in bandit.all_arms_for_context(platform)]
     result = await session.execute(
         select(BanditState).where(BanditState.arm_id.in_(arm_ids))
     )
@@ -81,16 +81,16 @@ async def _soft_update_bandit(
 async def plan_and_draft(
     llm: LLMClient,
     brief: str,
-    content_type: str,
+    platform: str,
     arm: Arm,
     temperature: float,
 ) -> tuple[str, str]:
     plan = await llm.generate(
-        plan_prompt(brief, content_type, arm.prompt_style),
+        plan_prompt(brief, platform, arm.prompt_style),
         temperature=temperature,
     )
     draft = await llm.generate(
-        draft_prompt(brief, content_type, arm.prompt_style, plan),
+        draft_prompt(brief, platform, arm.prompt_style, plan),
         temperature=temperature,
     )
     return plan, draft
@@ -108,13 +108,13 @@ async def _critique_and_maybe_revise(
     on_status: StatusCallback,
 ) -> ContentVersion:
     settings = get_settings()
-    content_type = job.content_type.value
+    platform = job.platform.value
     current_draft = draft
     current_version = version
 
     for rev_round in range(1, max_rounds + 1):
         await _set_status(session, job, JobStatus.critiquing, on_status)
-        critique = await critique_draft(llm, job.brief, content_type, current_draft)
+        critique = await critique_draft(llm, job.brief, platform, current_draft)
 
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
@@ -135,7 +135,9 @@ async def _critique_and_maybe_revise(
 
         await _set_status(session, job, JobStatus.revising, on_status)
         current_draft = await llm.generate(
-            revise_prompt(job.brief, current_draft, critique.critic_notes),
+            revise_prompt(
+                job.brief, current_draft, critique.critic_notes, platform=platform
+            ),
             temperature=float(action["temperature"]),
         )
         current_version = ContentVersion(
@@ -157,10 +159,9 @@ async def _critique_and_maybe_revise(
             },
         )
 
-    # Exhausted revisions — score the last draft
     if current_version.critic_score is None:
         await _set_status(session, job, JobStatus.critiquing, on_status)
-        critique = await critique_draft(llm, job.brief, content_type, current_draft)
+        critique = await critique_draft(llm, job.brief, platform, current_draft)
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
         await _soft_update_bandit(session, arm.arm_id, critique.critic_score)
@@ -190,9 +191,9 @@ async def run_pipeline(
         raise ValueError(f"Job {job_id} not found")
 
     try:
-        content_type = job.content_type.value
-        params = await _load_bandit_params(session, content_type)
-        arm = bandit.select_arm(content_type, params)
+        platform = job.platform.value
+        params = await _load_bandit_params(session, platform)
+        arm = bandit.select_arm(platform, params)
         action = arm.to_action()
         await _ensure_arm_row(session, arm.arm_id)
 
@@ -204,7 +205,7 @@ async def run_pipeline(
         _plan, draft = await plan_and_draft(
             llm,
             job.brief,
-            content_type,
+            platform,
             arm,
             temperature=float(action["temperature"]),
         )

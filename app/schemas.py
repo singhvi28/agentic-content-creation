@@ -3,12 +3,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.db.models import ContentType, JobStatus
+from app.db.models import JobStatus, Platform
 
 
 class GenerateRequest(BaseModel):
     brief: str = Field(..., min_length=1, max_length=10_000)
-    content_type: ContentType
+    platform: Platform
 
 
 class GenerateResponse(BaseModel):
@@ -32,7 +32,7 @@ class JobDetailResponse(BaseModel):
     job_id: UUID
     status: JobStatus
     brief: str
-    content_type: ContentType
+    platform: Platform
     versions: list[ContentVersionOut] = []
     final_content: str | None = None
     error_message: str | None = None
@@ -51,7 +51,7 @@ class FeedbackResponse(BaseModel):
 class ArmStats(BaseModel):
     arm_id: str
     prompt_style: str
-    content_type: str
+    platform: str
     alpha: float
     beta: float
     mean: float

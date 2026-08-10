@@ -1,4 +1,6 @@
-"""Prompt templates keyed by prompt_style arm."""
+"""Prompt templates keyed by prompt_style + platform preset."""
+
+from app.platforms import get_preset, preset_rules_block
 
 STYLE_INSTRUCTIONS = {
     "concise": (
@@ -15,21 +17,22 @@ STYLE_INSTRUCTIONS = {
     ),
 }
 
-CONTENT_TYPE_GUIDANCE = {
-    "blog_post": "Produce a structured blog post with a clear title, intro, body sections, and conclusion.",
-    "social_post": "Produce a short social media post (under ~280 words unless the brief says otherwise). Punchy and shareable.",
-    "email": "Produce a professional email with subject line, greeting, body, and sign-off.",
-}
 
-
-def plan_prompt(brief: str, content_type: str, prompt_style: str) -> str:
+def plan_prompt(brief: str, platform: str, prompt_style: str) -> str:
     style = STYLE_INSTRUCTIONS.get(prompt_style, STYLE_INSTRUCTIONS["concise"])
-    guidance = CONTENT_TYPE_GUIDANCE.get(content_type, "")
+    preset = get_preset(platform)
+    rules = preset_rules_block(preset)
+    structure_hint = (
+        "Plan a multi-post thread (numbered beats)."
+        if preset.structure == "thread"
+        else "Plan a single piece."
+    )
     return f"""You are a content strategist. Create a short outline/plan for the following brief.
 
-Content type: {content_type}
+{rules}
+
 Style: {style}
-Guidance: {guidance}
+Structure hint: {structure_hint}
 
 Brief:
 {brief}
@@ -37,14 +40,28 @@ Brief:
 Return a numbered outline only (5–8 bullets). No draft yet."""
 
 
-def draft_prompt(brief: str, content_type: str, prompt_style: str, plan: str) -> str:
+def draft_prompt(brief: str, platform: str, prompt_style: str, plan: str) -> str:
     style = STYLE_INSTRUCTIONS.get(prompt_style, STYLE_INSTRUCTIONS["concise"])
-    guidance = CONTENT_TYPE_GUIDANCE.get(content_type, "")
+    preset = get_preset(platform)
+    rules = preset_rules_block(preset)
+    format_hint = (
+        "Use Markdown formatting."
+        if preset.formatting == "markdown"
+        else "Use plain text only (no markdown headings)."
+    )
+    thread_hint = ""
+    if preset.structure == "thread":
+        thread_hint = (
+            "Format as a numbered thread (1/, 2/, …). "
+            "Respect the per-post character limit strictly."
+        )
     return f"""You are a professional content writer. Write the full piece based on the plan.
 
-Content type: {content_type}
+{rules}
+
 Style: {style}
-Guidance: {guidance}
+{format_hint}
+{thread_hint}
 
 Brief:
 {brief}
@@ -55,13 +72,15 @@ Plan:
 Return only the finished content — no meta commentary."""
 
 
-def critique_prompt(brief: str, content_type: str, draft: str) -> str:
-    return f"""You are a strict content editor. Score the draft against the brief.
+def critique_prompt(brief: str, platform: str, draft: str) -> str:
+    preset = get_preset(platform)
+    rules = preset_rules_block(preset)
+    return f"""You are a strict content editor. Score the draft against the brief and platform rules.
 
 Brief:
 {brief}
 
-Content type: {content_type}
+{rules}
 
 Draft:
 {draft}
@@ -70,13 +89,17 @@ Respond with ONLY valid JSON (no markdown fences):
 {{
   "coherence": <0-10 integer>,
   "on_topic": <0-10 integer>,
-  "notes": "<specific actionable feedback in 2-4 sentences>"
+  "notes": "<specific actionable feedback in 2-4 sentences, including platform/length/CTA issues>"
 }}"""
 
 
-def revise_prompt(brief: str, draft: str, notes: str) -> str:
+def revise_prompt(brief: str, draft: str, notes: str, platform: str | None = None) -> str:
+    extra = ""
+    if platform:
+        preset = get_preset(platform)
+        extra = f"\n\nPlatform rules to respect:\n{preset_rules_block(preset)}\n"
     return f"""You are a professional content writer revising a draft.
-
+{extra}
 Brief:
 {brief}
 

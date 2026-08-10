@@ -1,4 +1,4 @@
-"""Automated critic: LLM rubric + local readability / repetition checks."""
+"""Automated critic: LLM rubric + local readability / repetition / length checks."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import textstat
 
 from app.llm.gemini import LLMClient
 from app.orchestrator.prompts import critique_prompt
+from app.platforms import PlatformPreset, get_preset
 
 
 @dataclass
@@ -19,11 +20,11 @@ class CritiqueResult:
     on_topic: float
     readability: float
     repetition_penalty: float
+    length_score: float
 
 
 def flesch_to_0_10(flesch: float) -> float:
-    """Map Flesch Reading Ease (~0–100) to 0–10. Prefer ~60–70."""
-    # Clamp and scale: 0→0, 100→10, with soft peak around 60–70
+    """Map Flesch Reading Ease (~0–100) to 0–10."""
     clamped = max(0.0, min(100.0, flesch))
     return round(clamped / 10.0, 2)
 
@@ -43,8 +44,56 @@ def ngram_overlap_ratio(text: str, n: int = 3) -> float:
 def repetition_score_0_10(text: str) -> float:
     """10 = no repetition; 0 = highly repetitive."""
     overlap = ngram_overlap_ratio(text, n=3)
-    # overlap 0 → 10, overlap 0.5+ → ~0
     return round(max(0.0, 10.0 * (1.0 - min(1.0, overlap * 2))), 2)
+
+
+def split_thread_segments(text: str) -> list[str]:
+    """Split thread-style drafts into posts/tweets."""
+    # Prefer numbered segments: 1/ ... 2/ ... or Tweet 1: ...
+    numbered = re.split(
+        r"(?m)^\s*(?:\d+\s*/|\d+\.\s+|Tweet\s+\d+\s*:|Post\s+\d+\s*:)\s*",
+        text.strip(),
+    )
+    parts = [p.strip() for p in numbered if p and p.strip()]
+    if len(parts) >= 2:
+        return parts
+    # Fallback: blank-line separated
+    blanks = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
+    return blanks if blanks else [text.strip()]
+
+
+def length_score_0_10(text: str, preset: PlatformPreset) -> float:
+    """
+    10 = within caps; lower when over max_chars / max_words.
+    For threads, score the worst segment against max_chars.
+    """
+    scores: list[float] = []
+
+    if preset.max_chars is not None:
+        segments = (
+            split_thread_segments(text)
+            if preset.structure == "thread"
+            else [text]
+        )
+        for seg in segments:
+            n = len(seg)
+            if n <= preset.max_chars:
+                scores.append(10.0)
+            else:
+                over = (n - preset.max_chars) / preset.max_chars
+                scores.append(round(max(0.0, 10.0 * (1.0 - min(1.5, over))), 2))
+
+    if preset.max_words is not None:
+        words = len(re.findall(r"\b\w+\b", text))
+        if words <= preset.max_words:
+            scores.append(10.0)
+        else:
+            over = (words - preset.max_words) / preset.max_words
+            scores.append(round(max(0.0, 10.0 * (1.0 - min(1.5, over))), 2))
+
+    if not scores:
+        return 10.0
+    return round(min(scores), 2)
 
 
 def combine_scores(
@@ -52,13 +101,15 @@ def combine_scores(
     on_topic: float,
     readability: float,
     repetition: float,
+    length: float = 10.0,
 ) -> float:
     """Weighted blend into a single critic_score on 0–10."""
     score = (
-        0.30 * coherence
-        + 0.35 * on_topic
-        + 0.20 * readability
-        + 0.15 * repetition
+        0.25 * coherence
+        + 0.30 * on_topic
+        + 0.15 * readability
+        + 0.10 * repetition
+        + 0.20 * length
     )
     return round(max(0.0, min(10.0, score)), 2)
 
@@ -66,12 +117,11 @@ def combine_scores(
 async def critique_draft(
     llm: LLMClient,
     brief: str,
-    content_type: str,
+    platform: str,
     draft: str,
 ) -> CritiqueResult:
-    llm_result = await llm.generate_json(
-        critique_prompt(brief, content_type, draft)
-    )
+    preset = get_preset(platform)
+    llm_result = await llm.generate_json(critique_prompt(brief, platform, draft))
     coherence = float(llm_result.get("coherence", 5))
     on_topic = float(llm_result.get("on_topic", 5))
     notes = str(llm_result.get("notes", ""))
@@ -82,11 +132,12 @@ async def critique_draft(
         flesch = 50.0
     readability = flesch_to_0_10(flesch)
     repetition = repetition_score_0_10(draft)
+    length = length_score_0_10(draft, preset)
 
-    score = combine_scores(coherence, on_topic, readability, repetition)
+    score = combine_scores(coherence, on_topic, readability, repetition, length)
     local_notes = (
-        f"Readability(Flesch→0-10)={readability}; "
-        f"Repetition={repetition}."
+        f"Readability={readability}; Repetition={repetition}; "
+        f"Length={length} ({preset.id})."
     )
     full_notes = f"{notes} [{local_notes}]".strip()
 
@@ -97,4 +148,5 @@ async def critique_draft(
         on_topic=on_topic,
         readability=readability,
         repetition_penalty=repetition,
+        length_score=length,
     )

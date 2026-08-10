@@ -35,10 +35,14 @@ class JobStatus(str, enum.Enum):
     failed = "failed"
 
 
-class ContentType(str, enum.Enum):
-    blog_post = "blog_post"
-    social_post = "social_post"
-    email = "email"
+class Platform(str, enum.Enum):
+    linkedin = "linkedin"
+    twitter = "twitter"
+    medium = "medium"
+    youtube_script = "youtube_script"
+    newsletter = "newsletter"
+    instagram = "instagram"
+    threads = "threads"
 
 
 def _utcnow() -> datetime:
@@ -57,8 +61,8 @@ class Job(Base):
         nullable=False,
     )
     brief: Mapped[str] = mapped_column(Text, nullable=False)
-    content_type: Mapped[ContentType] = mapped_column(
-        Enum(ContentType, name="content_type", native_enum=False),
+    platform: Mapped[Platform] = mapped_column(
+        Enum(Platform, name="platform", native_enum=False),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -129,9 +133,7 @@ class Feedback(Base):
 class BanditState(Base):
     __tablename__ = "bandit_state"
 
-    # Composite key encoded as "arm_id::content_type" for simplicity,
-    # or we use arm_id + content_type as composite. Spec says arm_id as pk;
-    # for contextual bandit we use "{arm}|{content_type}" as arm_id.
+    # Spec says arm_id as pk; contextual bandit uses "{prompt_style}|{platform}".
     arm_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     alpha: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     beta: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)

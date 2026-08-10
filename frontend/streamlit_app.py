@@ -9,10 +9,14 @@ import pandas as pd
 import streamlit as st
 
 DEFAULT_API = "http://127.0.0.1:8000"
-CONTENT_TYPES = {
-    "Blog post": "blog_post",
-    "Social post": "social_post",
-    "Email": "email",
+PLATFORMS = {
+    "LinkedIn": "linkedin",
+    "X / Twitter": "twitter",
+    "Medium": "medium",
+    "YouTube script": "youtube_script",
+    "Newsletter": "newsletter",
+    "Instagram caption": "instagram",
+    "Threads": "threads",
 }
 TERMINAL = {"done", "failed"}
 
@@ -52,11 +56,11 @@ def poll_job(job_id: str, status_box, progress) -> dict:
 
 def page_generate() -> None:
     st.subheader("Generate content")
-    content_label = st.selectbox("Content type", list(CONTENT_TYPES.keys()))
+    platform_label = st.selectbox("Platform", list(PLATFORMS.keys()))
     brief = st.text_area(
         "Brief",
         height=140,
-        placeholder="e.g. Write a LinkedIn post about writing better tests…",
+        placeholder="e.g. Write about shipping faster with CI…",
     )
     if st.button("Generate", type="primary", disabled=not brief.strip()):
         try:
@@ -64,7 +68,7 @@ def page_generate() -> None:
                 "/content/generate",
                 {
                     "brief": brief.strip(),
-                    "content_type": CONTENT_TYPES[content_label],
+                    "platform": PLATFORMS[platform_label],
                 },
             )
         except httpx.HTTPError as exc:
@@ -91,7 +95,10 @@ def page_generate() -> None:
 
     st.divider()
     status = detail.get("status")
-    st.markdown(f"**Job** `{detail.get('job_id')}` · **{status}**")
+    platform = detail.get("platform", "?")
+    st.markdown(
+        f"**Job** `{detail.get('job_id')}` · **{status}** · platform=`{platform}`"
+    )
 
     if status == "failed":
         st.error(detail.get("error_message") or "Job failed")
@@ -161,13 +168,13 @@ def page_bandit() -> None:
 
     df = pd.DataFrame(arms)
     show = df[
-        ["prompt_style", "content_type", "alpha", "beta", "mean", "arm_id"]
-    ].sort_values(["content_type", "mean"], ascending=[True, False])
+        ["prompt_style", "platform", "alpha", "beta", "mean", "arm_id"]
+    ].sort_values(["platform", "mean"], ascending=[True, False])
     st.dataframe(show, use_container_width=True, hide_index=True)
 
-    st.markdown("#### Mean reward by style × content type")
+    st.markdown("#### Mean reward by style × platform")
     pivot = show.pivot_table(
-        index="prompt_style", columns="content_type", values="mean"
+        index="prompt_style", columns="platform", values="mean"
     )
     st.bar_chart(pivot)
 
@@ -179,7 +186,9 @@ def main() -> None:
         layout="wide",
     )
     st.title("Agentic Content Pipeline")
-    st.caption("Plan → Draft → Critique → Revise, with Thompson Sampling bandit")
+    st.caption(
+        "Plan → Draft → Critique → Revise · Thompson Sampling over style × platform"
+    )
 
     with st.sidebar:
         st.header("Settings")
@@ -190,7 +199,9 @@ def main() -> None:
         except Exception:
             st.error("API unreachable")
 
-        page = st.radio("Page", ["Generate", "Bandit stats"], label_visibility="collapsed")
+        page = st.radio(
+            "Page", ["Generate", "Bandit stats"], label_visibility="collapsed"
+        )
 
     if page == "Generate":
         page_generate()

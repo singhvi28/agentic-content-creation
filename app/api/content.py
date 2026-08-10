@@ -48,7 +48,7 @@ async def generate_content(
 ) -> GenerateResponse:
     job = Job(
         brief=body.brief,
-        content_type=body.content_type,
+        platform=body.platform,
         status=JobStatus.queued,
     )
     db.add(job)
@@ -88,7 +88,7 @@ async def get_job(
         job_id=job.id,
         status=job.status,
         brief=job.brief,
-        content_type=job.content_type,
+        platform=job.platform,
         versions=versions,
         final_content=final_content,
         error_message=job.error_message,

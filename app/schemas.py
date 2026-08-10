@@ -12,11 +12,14 @@ class GenerateRequest(BaseModel):
     job_type: JobType = JobType.single
     platform: Platform | None = None
     include_newsletter: bool = False
+    ab_variants: int | None = Field(default=None, ge=2, le=3)
 
     @model_validator(mode="after")
     def validate_job_fields(self) -> Self:
         if self.job_type == JobType.single and self.platform is None:
             raise ValueError("platform is required when job_type is single")
+        if self.ab_variants is not None and self.job_type != JobType.single:
+            raise ValueError("ab_variants is only supported for single jobs")
         return self
 
 
@@ -30,6 +33,7 @@ class ContentVersionOut(BaseModel):
     round: int
     text: str
     platform: Platform | None = None
+    variant_index: int | None = None
     critic_score: float | None = None
     critic_notes: str | None = None
     bandit_action: dict | None = None
@@ -47,6 +51,13 @@ class CampaignAssetOut(BaseModel):
     bandit_action: dict | None = None
 
 
+class AbVariantOut(BaseModel):
+    version_id: UUID
+    variant_index: int
+    text: str
+    bandit_action: dict | None = None
+
+
 class JobDetailResponse(BaseModel):
     job_id: UUID
     status: JobStatus
@@ -57,8 +68,11 @@ class JobDetailResponse(BaseModel):
     shared_plan: str | None = None
     cross_surface_score: float | None = None
     cross_surface_notes: str | None = None
+    ab_variants: int | None = None
+    chosen_version_id: UUID | None = None
     versions: list[ContentVersionOut] = []
     assets: list[CampaignAssetOut] = []
+    variants: list[AbVariantOut] = []
     final_content: str | None = None
     error_message: str | None = None
 
@@ -78,6 +92,15 @@ class FeedbackRequest(BaseModel):
 
 class FeedbackResponse(BaseModel):
     ok: bool = True
+
+
+class ChooseRequest(BaseModel):
+    content_version_id: UUID
+
+
+class ChooseResponse(BaseModel):
+    ok: bool = True
+    status: JobStatus = JobStatus.queued
 
 
 class ArmStats(BaseModel):

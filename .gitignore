@@ -14,3 +14,4 @@ pgdata/
 file:apitest
 *.db
 *.sqlite3
+file:apitest*

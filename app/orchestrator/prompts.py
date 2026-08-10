@@ -188,3 +188,41 @@ Respond with ONLY valid JSON (no markdown fences):
   "cta_alignment": <0-10 integer>,
   "notes": "<2-4 sentences on contradictions, mismatched hooks/CTAs, or brand drift>"
 }}"""
+
+
+def draft_with_hook_variant_prompt(
+    brief: str,
+    platform: str,
+    prompt_style: str,
+    variant_index: int,
+    total: int,
+) -> str:
+    style = STYLE_INSTRUCTIONS.get(prompt_style, STYLE_INSTRUCTIONS["concise"])
+    preset = get_preset(platform)
+    rules = preset_rules_block(preset)
+    format_hint = (
+        "Use Markdown formatting."
+        if preset.formatting == "markdown"
+        else "Use plain text only (no markdown headings)."
+    )
+    thread_hint = ""
+    if preset.structure == "thread":
+        thread_hint = (
+            "Format as a numbered thread (1/, 2/, …). "
+            "Respect the per-post character limit strictly."
+        )
+    return f"""You are a professional content writer creating an A/B hook variant.
+
+This is variant {variant_index + 1} of {total}. Invent a clearly different opening hook
+from what other variants would use, while keeping the same brief and message.
+
+{rules}
+
+Style: {style}
+{format_hint}
+{thread_hint}
+
+Brief:
+{brief}
+
+Return only the finished content — no meta commentary."""

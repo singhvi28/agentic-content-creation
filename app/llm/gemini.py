@@ -124,6 +124,13 @@ class FakeLLMClient:
                 "Campaign asset draft adapted from the shared plan. "
                 "Clear hook and consistent CTA."
             )
+        if "a/b hook variant" in lower or "invent a clearly different opening hook" in lower:
+            m = re.search(r"variant\s+(\d+)\s+of\s+(\d+)", lower)
+            idx = int(m.group(1)) if m else 1
+            return (
+                f"Hook variant {idx}: Distinct opening for A/B test. "
+                "Draft content based on the brief. Clear, useful, and complete."
+            )
         return "Draft content based on the brief. Clear, useful, and complete."
 
     async def generate_json(

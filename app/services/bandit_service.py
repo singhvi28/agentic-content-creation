@@ -63,6 +63,35 @@ async def apply_feedback_to_bandit(
     await _bump_arm(session, arm_id, rating)
 
 
+async def apply_ab_choice(
+    session: AsyncSession,
+    job: Job,
+    winner_version_id,
+) -> None:
+    """Pairwise bandit update: winner success, other variant arms failure."""
+    variants = [v for v in job.versions if v.variant_index is not None]
+    if not variants:
+        return
+
+    winner = next((v for v in variants if v.id == winner_version_id), None)
+    if winner is None:
+        raise ValueError("winner is not an A/B variant on this job")
+
+    winner_arm = (winner.bandit_action or {}).get("arm_id")
+    loser_arms: set[str] = set()
+    for v in variants:
+        if v.id == winner_version_id:
+            continue
+        arm_id = (v.bandit_action or {}).get("arm_id")
+        if arm_id and arm_id != winner_arm:
+            loser_arms.add(arm_id)
+
+    if winner_arm:
+        await _bump_arm(session, winner_arm, 5)
+    for arm_id in loser_arms:
+        await _bump_arm(session, arm_id, 1)
+
+
 async def apply_pack_feedback_to_bandit(
     session: AsyncSession,
     job: Job,

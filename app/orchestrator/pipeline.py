@@ -15,7 +15,13 @@ from app.config import get_settings
 from app.db.models import BanditState, ContentVersion, Job, JobStatus, JobType, Platform
 from app.llm.gemini import LLMClient
 from app.orchestrator.evaluator import critique_draft
-from app.orchestrator.prompts import draft_prompt, plan_prompt, revise_prompt
+from app.orchestrator.prompts import (
+    draft_prompt,
+    draft_with_hook_variant_prompt,
+    plan_prompt,
+    revise_prompt,
+)
+from app.services.bandit_service import apply_ab_choice
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +157,7 @@ async def _critique_and_maybe_revise(
             round=rev_round,
             text=current_draft,
             bandit_action=action,
+            variant_index=None,
         )
         session.add(current_version)
         await session.commit()
@@ -177,6 +184,223 @@ async def _critique_and_maybe_revise(
     return current_version
 
 
+async def _run_ab_phase_a(
+    session: AsyncSession,
+    job: Job,
+    llm: LLMClient,
+    bandit: ThompsonSamplingBandit,
+    on_status: StatusCallback,
+) -> None:
+    """Generate N hook variants and pause for user choice."""
+    assert job.platform is not None and job.ab_variants is not None
+    platform = job.platform.value
+    n = job.ab_variants
+
+    await _set_status(
+        session, job, JobStatus.drafting, on_status, {"ab_variants": n}
+    )
+
+    for i in range(n):
+        params = await _load_bandit_params(session, platform)
+        arm = bandit.select_arm(platform, params)
+        action = arm.to_action()
+        await _ensure_arm_row(session, arm.arm_id)
+
+        draft = await llm.generate(
+            draft_with_hook_variant_prompt(
+                job.brief, platform, arm.prompt_style, i, n
+            ),
+            temperature=float(action["temperature"]),
+        )
+        version = ContentVersion(
+            job_id=job.id,
+            platform=job.platform,
+            round=0,
+            variant_index=i,
+            text=draft,
+            bandit_action=action,
+        )
+        session.add(version)
+        await session.commit()
+        await session.refresh(version)
+        await on_status(
+            job.id,
+            JobStatus.drafting,
+            {
+                "variant_index": i,
+                "version_id": str(version.id),
+                "text": draft,
+                "arm": action,
+            },
+        )
+
+    await _set_status(
+        session,
+        job,
+        JobStatus.awaiting_choice,
+        on_status,
+        {"ab_variants": n},
+    )
+
+
+async def _run_ab_phase_b(
+    session: AsyncSession,
+    job: Job,
+    llm: LLMClient,
+    on_status: StatusCallback,
+) -> None:
+    """Resume after user chose a winner: bandit update + critique/revise."""
+    settings = get_settings()
+    assert job.platform is not None and job.chosen_version_id is not None
+
+    # Ensure versions are loaded
+    await session.refresh(job, attribute_names=["versions"])
+
+    winner = await session.get(ContentVersion, job.chosen_version_id)
+    if winner is None or winner.job_id != job.id:
+        raise ValueError("chosen_version_id is invalid for this job")
+    if winner.variant_index is None:
+        raise ValueError("chosen version is not an A/B variant")
+
+    await apply_ab_choice(session, job, winner.id)
+    await session.commit()
+
+    action = winner.bandit_action or {}
+    arm_id = action.get("arm_id")
+    if not arm_id:
+        # Reconstruct a minimal arm action from platform
+        from app.bandit.thompson import Arm
+
+        arm = Arm("concise", job.platform.value)
+        action = arm.to_action()
+        arm_id = arm.arm_id
+
+    style = action.get("prompt_style", "concise")
+    from app.bandit.thompson import Arm
+
+    arm = Arm(style, job.platform.value)
+    await _ensure_arm_row(session, arm.arm_id)
+
+    max_rounds = int(
+        action.get("max_revision_rounds", settings.max_revision_rounds)
+    )
+    final_version = await _critique_and_maybe_revise(
+        session,
+        job,
+        llm,
+        arm,
+        action,
+        winner.text,
+        winner,
+        max_rounds,
+        on_status,
+        platform=job.platform.value,
+    )
+
+    job.final_content_id = final_version.id
+    await _set_status(
+        session,
+        job,
+        JobStatus.done,
+        on_status,
+        {
+            "final_content_id": str(final_version.id),
+            "final_content": final_version.text,
+        },
+    )
+
+
+async def _run_single_pipeline(
+    session: AsyncSession,
+    job: Job,
+    llm: LLMClient,
+    bandit: ThompsonSamplingBandit,
+    on_status: StatusCallback,
+) -> None:
+    settings = get_settings()
+    if job.platform is None:
+        raise ValueError("Single job requires platform")
+
+    # A/B resume
+    if job.chosen_version_id is not None:
+        await _run_ab_phase_b(session, job, llm, on_status)
+        return
+
+    # Waiting for choice — worker re-invoked early
+    if job.status == JobStatus.awaiting_choice:
+        logger.info("Job %s still awaiting_choice; skipping", job.id)
+        return
+
+    # A/B phase A
+    if job.ab_variants:
+        await _run_ab_phase_a(session, job, llm, bandit, on_status)
+        return
+
+    # Normal single path
+    platform = job.platform.value
+    params = await _load_bandit_params(session, platform)
+    arm = bandit.select_arm(platform, params)
+    action = arm.to_action()
+    await _ensure_arm_row(session, arm.arm_id)
+
+    await _set_status(
+        session, job, JobStatus.planning, on_status, {"arm": action}
+    )
+    await _set_status(session, job, JobStatus.drafting, on_status)
+
+    _plan, draft = await plan_and_draft(
+        llm,
+        job.brief,
+        platform,
+        arm,
+        temperature=float(action["temperature"]),
+    )
+
+    version = ContentVersion(
+        job_id=job.id,
+        platform=job.platform,
+        round=0,
+        text=draft,
+        bandit_action=action,
+    )
+    session.add(version)
+    await session.commit()
+    await session.refresh(version)
+    await on_status(
+        job.id,
+        JobStatus.drafting,
+        {"version_id": str(version.id), "round": 0, "text": draft},
+    )
+
+    max_rounds = int(
+        action.get("max_revision_rounds", settings.max_revision_rounds)
+    )
+    final_version = await _critique_and_maybe_revise(
+        session,
+        job,
+        llm,
+        arm,
+        action,
+        draft,
+        version,
+        max_rounds,
+        on_status,
+        platform=platform,
+    )
+
+    job.final_content_id = final_version.id
+    await _set_status(
+        session,
+        job,
+        JobStatus.done,
+        on_status,
+        {
+            "final_content_id": str(final_version.id),
+            "final_content": final_version.text,
+        },
+    )
+
+
 async def run_pipeline(
     session: AsyncSession,
     job_id: uuid.UUID,
@@ -184,7 +408,6 @@ async def run_pipeline(
     bandit: ThompsonSamplingBandit | None = None,
     on_status: StatusCallback | None = None,
 ) -> None:
-    settings = get_settings()
     bandit = bandit or ThompsonSamplingBandit()
     on_status = on_status or _noop_callback
 
@@ -204,71 +427,7 @@ async def run_pipeline(
             await run_campaign_pipeline(session, job, llm, bandit, on_status)
             return
 
-        if job.platform is None:
-            raise ValueError("Single job requires platform")
-
-        platform = job.platform.value
-        params = await _load_bandit_params(session, platform)
-        arm = bandit.select_arm(platform, params)
-        action = arm.to_action()
-        await _ensure_arm_row(session, arm.arm_id)
-
-        await _set_status(
-            session, job, JobStatus.planning, on_status, {"arm": action}
-        )
-        await _set_status(session, job, JobStatus.drafting, on_status)
-
-        _plan, draft = await plan_and_draft(
-            llm,
-            job.brief,
-            platform,
-            arm,
-            temperature=float(action["temperature"]),
-        )
-
-        version = ContentVersion(
-            job_id=job.id,
-            platform=job.platform,
-            round=0,
-            text=draft,
-            bandit_action=action,
-        )
-        session.add(version)
-        await session.commit()
-        await session.refresh(version)
-        await on_status(
-            job.id,
-            JobStatus.drafting,
-            {"version_id": str(version.id), "round": 0, "text": draft},
-        )
-
-        max_rounds = int(
-            action.get("max_revision_rounds", settings.max_revision_rounds)
-        )
-        final_version = await _critique_and_maybe_revise(
-            session,
-            job,
-            llm,
-            arm,
-            action,
-            draft,
-            version,
-            max_rounds,
-            on_status,
-            platform=platform,
-        )
-
-        job.final_content_id = final_version.id
-        await _set_status(
-            session,
-            job,
-            JobStatus.done,
-            on_status,
-            {
-                "final_content_id": str(final_version.id),
-                "final_content": final_version.text,
-            },
-        )
+        await _run_single_pipeline(session, job, llm, bandit, on_status)
     except Exception as exc:
         logger.exception("Pipeline failed for job %s", job_id)
         job.status = JobStatus.failed

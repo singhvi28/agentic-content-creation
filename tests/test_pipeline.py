@@ -159,3 +159,111 @@ async def test_campaign_pipeline_and_pack_feedback(session: AsyncSession):
     for arm_id, alpha0 in before.items():
         row = await session.get(BanditState, arm_id)
         assert row.alpha == alpha0 + 1.0
+
+
+@pytest.mark.asyncio
+async def test_ab_pipeline_pauses_then_resumes(session: AsyncSession):
+    job = Job(
+        brief="A/B hooks for remote work tip.",
+        job_type=JobType.single,
+        platform=Platform.linkedin,
+        ab_variants=2,
+        status=JobStatus.queued,
+    )
+    session.add(job)
+    await session.commit()
+
+    llm = FakeLLMClient()
+    bandit = ThompsonSamplingBandit(rng=default_rng(11))
+    await run_pipeline(session, job.id, llm, bandit=bandit)
+
+    await session.refresh(job)
+    assert job.status == JobStatus.awaiting_choice
+    assert job.final_content_id is None
+
+    from app.db.models import ContentVersion
+    from sqlalchemy.orm import selectinload
+
+    result = await session.execute(
+        select(Job)
+        .where(Job.id == job.id)
+        .options(selectinload(Job.versions))
+    )
+    job = result.scalar_one()
+    variants = [v for v in job.versions if v.variant_index is not None]
+    assert len(variants) == 2
+    assert all("Hook variant" in v.text for v in variants)
+
+    # Worker re-entry without choice is a no-op
+    await run_pipeline(session, job.id, llm, bandit=bandit)
+    await session.refresh(job)
+    assert job.status == JobStatus.awaiting_choice
+
+    winner = variants[0]
+    job.chosen_version_id = winner.id
+    job.status = JobStatus.queued
+    await session.commit()
+
+    await run_pipeline(session, job.id, llm, bandit=bandit)
+    await session.refresh(job)
+    assert job.status == JobStatus.done
+    assert job.final_content_id is not None
+
+
+@pytest.mark.asyncio
+async def test_apply_ab_choice_bandit_pairwise(session: AsyncSession):
+    from app.db.models import ContentVersion
+    from app.services.bandit_service import apply_ab_choice
+    from sqlalchemy.orm import selectinload
+
+    job = Job(
+        brief="Pairwise bandit signal.",
+        job_type=JobType.single,
+        platform=Platform.twitter,
+        ab_variants=2,
+        status=JobStatus.awaiting_choice,
+    )
+    session.add(job)
+    await session.flush()
+
+    arm_w = "concise|twitter"
+    arm_l = "storytelling|twitter"
+    v0 = ContentVersion(
+        job_id=job.id,
+        platform=Platform.twitter,
+        round=0,
+        variant_index=0,
+        text="Hook variant 1",
+        bandit_action={"arm_id": arm_w, "prompt_style": "concise"},
+    )
+    v1 = ContentVersion(
+        job_id=job.id,
+        platform=Platform.twitter,
+        round=0,
+        variant_index=1,
+        text="Hook variant 2",
+        bandit_action={"arm_id": arm_l, "prompt_style": "storytelling"},
+    )
+    session.add_all([v0, v1])
+    await session.commit()
+
+    w_before = await session.get(BanditState, arm_w)
+    l_before = await session.get(BanditState, arm_l)
+    w_a, w_b = w_before.alpha, w_before.beta
+    l_a, l_b = l_before.alpha, l_before.beta
+
+    result = await session.execute(
+        select(Job)
+        .where(Job.id == job.id)
+        .options(selectinload(Job.versions))
+    )
+    job = result.scalar_one()
+    await apply_ab_choice(session, job, v0.id)
+    await session.commit()
+
+    w_after = await session.get(BanditState, arm_w)
+    l_after = await session.get(BanditState, arm_l)
+    assert w_after.alpha == w_a + 1.0
+    assert w_after.beta == w_b
+    assert l_after.alpha == l_a
+    assert l_after.beta == l_b + 1.0

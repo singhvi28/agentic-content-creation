@@ -19,6 +19,7 @@ PLATFORMS = {
     "Threads": "threads",
 }
 TERMINAL = {"done", "failed"}
+PAUSE = {"awaiting_choice"}
 
 
 def api_base() -> str:
@@ -47,7 +48,7 @@ def poll_job(job_id: str, status_box, progress) -> dict:
         n_versions = len(detail.get("versions") or [])
         status_box.info(f"Status: **{status}** · versions: {n_versions}")
         progress.progress(min(1.0, (i + 1) / 180))
-        if status in TERMINAL:
+        if status in TERMINAL or status in PAUSE:
             break
         time.sleep(2)
     progress.progress(1.0)
@@ -66,8 +67,14 @@ def page_generate() -> None:
 
     platform_label = None
     include_newsletter = False
+    ab_choice = "Off"
     if mode == "Single platform":
         platform_label = st.selectbox("Platform", list(PLATFORMS.keys()))
+        ab_choice = st.selectbox(
+            "A/B hook variants",
+            ["Off", "2", "3"],
+            help="Generate multiple drafts with different hooks, then pick a winner.",
+        )
     else:
         st.caption(
             "Default pack: Medium, YouTube script, X thread, LinkedIn. "
@@ -89,6 +96,8 @@ def page_generate() -> None:
                     "job_type": "single",
                     "platform": PLATFORMS[platform_label],
                 }
+                if ab_choice != "Off":
+                    body["ab_variants"] = int(ab_choice)
             created = post_json("/content/generate", body)
         except httpx.HTTPError as exc:
             st.error(f"Failed to enqueue job: {exc}")
@@ -121,6 +130,44 @@ def page_generate() -> None:
 
     if status == "failed":
         st.error(detail.get("error_message") or "Job failed")
+        return
+
+    # A/B pick-winner UI
+    if status == "awaiting_choice":
+        variants = detail.get("variants") or []
+        st.markdown("#### Pick a hook winner")
+        st.caption("Choose the strongest opening; critique/revise continues on that draft.")
+        if not variants:
+            st.warning("No variants found on this job.")
+            return
+        cols = st.columns(len(variants))
+        for col, variant in zip(cols, variants):
+            with col:
+                idx = variant.get("variant_index", 0)
+                action = variant.get("bandit_action") or {}
+                style = action.get("prompt_style", "?")
+                st.markdown(f"**Variant {idx + 1}** · style=`{style}`")
+                st.write(variant.get("text") or "")
+                if st.button(
+                    f"Pick winner #{idx + 1}",
+                    key=f"pick_{variant['version_id']}",
+                    type="primary",
+                ):
+                    try:
+                        post_json(
+                            f"/content/{detail['job_id']}/choose",
+                            {"content_version_id": variant["version_id"]},
+                        )
+                        status_box = st.empty()
+                        progress = st.progress(0.0)
+                        with st.spinner("Resuming pipeline…"):
+                            detail = poll_job(
+                                detail["job_id"], status_box, progress
+                            )
+                        st.session_state["job_detail"] = detail
+                        st.rerun()
+                    except httpx.HTTPError as exc:
+                        st.error(f"Choose failed: {exc}")
         return
 
     if detail.get("shared_plan"):
@@ -165,8 +212,10 @@ def page_generate() -> None:
         for v in versions:
             action = v.get("bandit_action") or {}
             style = action.get("prompt_style", "?")
+            vi = v.get("variant_index")
+            variant_bit = f" · AB#{vi + 1}" if vi is not None else ""
             label = (
-                f"Round {v['round']} · style={style} · "
+                f"Round {v['round']}{variant_bit} · style={style} · "
                 f"critic={v.get('critic_score')}"
             )
             with st.expander(label, expanded=(v["round"] == versions[-1]["round"])):
@@ -269,7 +318,8 @@ def main() -> None:
     )
     st.title("Agentic Content Pipeline")
     st.caption(
-        "Single platforms or campaign packs · Thompson Sampling over style × platform"
+        "Single platforms, campaign packs, or A/B hook variants · "
+        "Thompson Sampling over style × platform"
     )
 
     with st.sidebar:

@@ -31,6 +31,7 @@ class JobStatus(str, enum.Enum):
     drafting = "drafting"
     critiquing = "critiquing"
     revising = "revising"
+    awaiting_choice = "awaiting_choice"
     done = "done"
     failed = "failed"
 
@@ -84,6 +85,16 @@ class Job(Base):
     shared_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
     cross_surface_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     cross_surface_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ab_variants: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chosen_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "content_versions.id",
+            use_alter=True,
+            name="fk_jobs_chosen_version",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -118,6 +129,7 @@ class ContentVersion(Base):
         Enum(Platform, name="version_platform", native_enum=False),
         nullable=True,
     )
+    variant_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     round: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     critic_score: Mapped[float | None] = mapped_column(Float, nullable=True)

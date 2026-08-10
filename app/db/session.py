@@ -106,6 +106,12 @@ async def _migrate_campaign_columns(conn) -> None:
         )
 
 
+async def _migrate_ab_columns(conn) -> None:
+    await _add_column_if_missing(conn, "jobs", "ab_variants", "INTEGER")
+    await _add_column_if_missing(conn, "jobs", "chosen_version_id", "CHAR(36)")
+    await _add_column_if_missing(conn, "content_versions", "variant_index", "INTEGER")
+
+
 async def init_db() -> None:
     from app.db.models import Base
 
@@ -113,3 +119,4 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await _migrate_content_type_to_platform(conn)
         await _migrate_campaign_columns(conn)
+        await _migrate_ab_columns(conn)

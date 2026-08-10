@@ -13,7 +13,10 @@ from app.db.models import Job, JobStatus, JobType
 from app.db.session import get_db
 from app.platforms import get_preset
 from app.schemas import (
+    AbVariantOut,
     CampaignAssetOut,
+    ChooseRequest,
+    ChooseResponse,
     ContentVersionOut,
     FeedbackRequest,
     FeedbackResponse,
@@ -65,6 +68,23 @@ def _latest_assets(job: Job) -> list[CampaignAssetOut]:
     return assets
 
 
+def _ab_variants(job: Job) -> list[AbVariantOut]:
+    variants: list[AbVariantOut] = []
+    for v in sorted(
+        [x for x in job.versions if x.variant_index is not None],
+        key=lambda x: x.variant_index or 0,
+    ):
+        variants.append(
+            AbVariantOut(
+                version_id=v.id,
+                variant_index=v.variant_index or 0,
+                text=v.text,
+                bandit_action=v.bandit_action,
+            )
+        )
+    return variants
+
+
 def _campaign_pack_markdown(job: Job, assets: list[CampaignAssetOut]) -> str:
     parts = ["# Campaign pack", ""]
     if job.shared_plan:
@@ -95,6 +115,7 @@ async def generate_content(
             job_type=JobType.campaign,
             platform=None,
             platforms=platforms,
+            ab_variants=None,
             status=JobStatus.queued,
         )
     else:
@@ -103,6 +124,7 @@ async def generate_content(
             job_type=JobType.single,
             platform=body.platform,
             platforms=None,
+            ab_variants=body.ab_variants,
             status=JobStatus.queued,
         )
     db.add(job)
@@ -131,6 +153,7 @@ async def get_job(
 
     versions = [ContentVersionOut.model_validate(v) for v in job.versions]
     assets = _latest_assets(job)
+    variants = _ab_variants(job)
 
     final_content = None
     if job.job_type == JobType.campaign:
@@ -152,11 +175,53 @@ async def get_job(
         shared_plan=job.shared_plan,
         cross_surface_score=job.cross_surface_score,
         cross_surface_notes=job.cross_surface_notes,
+        ab_variants=job.ab_variants,
+        chosen_version_id=job.chosen_version_id,
         versions=versions,
         assets=assets,
+        variants=variants,
         final_content=final_content,
         error_message=job.error_message,
     )
+
+
+@router.post("/{job_id}/choose", response_model=ChooseResponse)
+async def choose_variant(
+    job_id: uuid.UUID,
+    body: ChooseRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ChooseResponse:
+    result = await db.execute(
+        select(Job)
+        .where(Job.id == job_id)
+        .options(selectinload(Job.versions))
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != JobStatus.awaiting_choice:
+        raise HTTPException(
+            status_code=400,
+            detail="Job is not awaiting an A/B choice",
+        )
+
+    winner = next(
+        (v for v in job.versions if v.id == body.content_version_id), None
+    )
+    if winner is None or winner.variant_index is None:
+        raise HTTPException(
+            status_code=400,
+            detail="content_version_id must be an A/B variant on this job",
+        )
+
+    job.chosen_version_id = winner.id
+    job.status = JobStatus.queued
+    await db.commit()
+
+    pool = await get_arq_pool()
+    await pool.enqueue_job("run_content_job", str(job.id))
+
+    return ChooseResponse(ok=True, status=JobStatus.queued)
 
 
 @router.post("/{job_id}/feedback", response_model=FeedbackResponse)

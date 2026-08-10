@@ -13,6 +13,10 @@ Also supports **campaign packs**: one brief → shared plan → Medium + YouTube
 script + X thread + LinkedIn (+ optional newsletter), with a cross-surface
 consistency critic and pack-level feedback.
 
+Single-platform jobs can run **A/B hook variants** (`ab_variants` = 2 or 3):
+generate distinct openings, pause at `awaiting_choice`, then continue after
+`POST /content/{id}/choose` (winner/loser bandit update).
+
 > **LLM note:** The original SPEC suggested Anthropic Claude. This implementation
 > supports **Cursor SDK** (`CURSOR_API_KEY`, default when set) and **Google Gemini**
 > (`GEMINI_API_KEY`). Set `LLM_PROVIDER=cursor|gemini|auto|fake`.
@@ -101,8 +105,9 @@ arq app.worker.tasks.WorkerSettings
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/content/generate` | Enqueue single or campaign job |
-| `GET` | `/content/{job_id}` | Job status, versions, assets, final content |
+| `GET` | `/content/{job_id}` | Job status, versions, assets, variants, final content |
 | `WS` | `/content/{job_id}/stream` | Status + draft events |
+| `POST` | `/content/{job_id}/choose` | Pick A/B hook winner → resume critique/revise |
 | `POST` | `/content/{job_id}/feedback` | Asset or pack rating → bandit update |
 | `GET` | `/bandit/stats` | α/β (and mean) per arm |
 | `GET` | `/health` | Liveness |
@@ -116,6 +121,22 @@ curl -s -X POST http://localhost:8000/content/generate \
   -H 'Content-Type: application/json' \
   -d '{"brief":"Write about shipping faster with CI","job_type":"single","platform":"linkedin"}'
 ```
+
+A/B hook variants (single jobs only; `ab_variants` = 2 or 3):
+
+```bash
+# 1) Generate N drafts with different hooks → status awaiting_choice
+curl -s -X POST http://localhost:8000/content/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"brief":"Write about shipping faster with CI","job_type":"single","platform":"linkedin","ab_variants":2}'
+
+# 2) Pick winner (version_id from GET /content/{job_id} → variants)
+curl -s -X POST http://localhost:8000/content/{job_id}/choose \
+  -H 'Content-Type: application/json' \
+  -d '{"content_version_id":"<winner_version_id>"}'
+```
+
+On choose, the winner arm gets a success bump and other variant arms get a failure bump; then critique → revise → done continues on the winner.
 
 Campaign example (default pack + optional newsletter):
 
@@ -144,6 +165,7 @@ streamlit run frontend/streamlit_app.py
 ```
 
 Opens a simple UI for generate → poll → feedback and `/bandit/stats`.
+Single mode includes an **A/B hook variants** control (Off / 2 / 3) and a pick-winner step when the job is `awaiting_choice`.
 Default API URL: `http://127.0.0.1:8000` (changeable in the sidebar).
 
 ---
@@ -163,6 +185,7 @@ Coverage includes:
 - Evaluator local metrics (Flesch, n-gram repetition, platform length caps)
 - Orchestrator with `FakeLLMClient`
 - API flow: generate → poll → feedback → `/bandit/stats` (21 arms)
+- A/B variants: generate → `awaiting_choice` → `/choose` → done + pairwise bandit update
 
 ---
 
@@ -190,6 +213,7 @@ tests/
 Honest stretch, not built here:
 
 - Multi-platform campaign packs are implemented (shared plan + per-platform drafts + cross-surface critic)
+- A/B hook variants for single jobs (awaiting_choice + /choose)
 - Multi-dimensional arms (`temperature`, `revision_rounds`) or LinUCB
 - PPO/DPO / preference training offline (separate from online bandit)
 - Vector DB / RAG for brand voice and prior examples

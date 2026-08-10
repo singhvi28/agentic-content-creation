@@ -17,7 +17,7 @@ from app.services.bandit_service import seed_bandit_arms
 @pytest_asyncio.fixture
 async def client():
     engine = create_async_engine(
-        "sqlite+aiosqlite:///file:apitest_campaign?mode=memory&cache=shared",
+        "sqlite+aiosqlite:///file:apitest_ab?mode=memory&cache=shared",
         connect_args={"uri": True},
     )
     async with engine.begin() as conn:
@@ -154,3 +154,83 @@ async def test_campaign_generate_flow(client):
         json={"scope": "asset", "content_version_id": asset_id, "rating": 4},
     )
     assert asset_fb.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ab_generate_choose_flow(client):
+    r = await client.post(
+        "/content/generate",
+        json={
+            "brief": "A/B hooks about async Python.",
+            "job_type": "single",
+            "platform": "linkedin",
+            "ab_variants": 2,
+        },
+    )
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+
+    detail = await client.get(f"/content/{job_id}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["status"] == "awaiting_choice"
+    assert body["ab_variants"] == 2
+    variants = body.get("variants") or []
+    assert len(variants) == 2
+    assert all("Hook variant" in (v.get("text") or "") for v in variants)
+
+    # Choose rejects wrong status after we finish — first reject non-variant
+    bad = await client.post(
+        f"/content/{job_id}/choose",
+        json={"content_version_id": str(uuid.uuid4())},
+    )
+    assert bad.status_code == 400
+
+    winner_id = variants[0]["version_id"]
+    chosen = await client.post(
+        f"/content/{job_id}/choose",
+        json={"content_version_id": winner_id},
+    )
+    assert chosen.status_code == 200
+    assert chosen.json()["status"] == "queued"
+
+    detail2 = await client.get(f"/content/{job_id}")
+    body2 = detail2.json()
+    assert body2["status"] == "done"
+    assert body2["chosen_version_id"] == winner_id
+    assert body2["final_content"]
+
+
+@pytest.mark.asyncio
+async def test_choose_rejects_non_awaiting(client):
+    r = await client.post(
+        "/content/generate",
+        json={
+            "brief": "Plain single job.",
+            "job_type": "single",
+            "platform": "twitter",
+        },
+    )
+    job_id = r.json()["job_id"]
+    detail = (await client.get(f"/content/{job_id}")).json()
+    assert detail["status"] == "done"
+    version_id = detail["versions"][0]["id"]
+
+    resp = await client.post(
+        f"/content/{job_id}/choose",
+        json={"content_version_id": version_id},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_ab_variants_rejected_on_campaign(client):
+    r = await client.post(
+        "/content/generate",
+        json={
+            "brief": "Nope",
+            "job_type": "campaign",
+            "ab_variants": 2,
+        },
+    )
+    assert r.status_code == 422

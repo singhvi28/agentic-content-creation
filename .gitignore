@@ -11,3 +11,6 @@ build/
 .coverage
 htmlcov/
 pgdata/
+file:apitest
+*.db
+*.sqlite3

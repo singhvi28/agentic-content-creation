@@ -1,0 +1,71 @@
+import pytest
+from numpy.random import default_rng
+
+from app.bandit.thompson import (
+    PROMPT_STYLES,
+    Arm,
+    ArmParams,
+    ThompsonSamplingBandit,
+    expected_value,
+)
+
+
+def test_arm_id_roundtrip():
+    arm = Arm("concise", "blog_post")
+    assert arm.arm_id == "concise|blog_post"
+    assert Arm.from_arm_id(arm.arm_id) == arm
+
+
+def test_select_arm_is_deterministic_with_seed():
+    params = [
+        ArmParams(f"{s}|blog_post", alpha=1.0, beta=1.0) for s in PROMPT_STYLES
+    ]
+    b1 = ThompsonSamplingBandit(rng=default_rng(42))
+    b2 = ThompsonSamplingBandit(rng=default_rng(42))
+    assert b1.select_arm("blog_post", params) == b2.select_arm("blog_post", params)
+
+
+def test_select_arm_prefers_high_alpha():
+    """With enough samples, high-alpha arm should usually win."""
+    params = [
+        ArmParams("concise|social_post", alpha=50.0, beta=1.0),
+        ArmParams("storytelling|social_post", alpha=1.0, beta=50.0),
+        ArmParams("data_driven|social_post", alpha=1.0, beta=50.0),
+    ]
+    bandit = ThompsonSamplingBandit(rng=default_rng(0))
+    wins = {"concise": 0, "storytelling": 0, "data_driven": 0}
+    for _ in range(100):
+        arm = bandit.select_arm("social_post", params)
+        wins[arm.prompt_style] += 1
+    assert wins["concise"] > 80
+
+
+def test_update_from_rating():
+    assert ThompsonSamplingBandit.update_from_rating(1.0, 1.0, 5) == (2.0, 1.0)
+    assert ThompsonSamplingBandit.update_from_rating(1.0, 1.0, 1) == (1.0, 2.0)
+    assert ThompsonSamplingBandit.update_from_rating(1.0, 1.0, 3) == (1.0, 1.0)
+
+
+def test_update_from_critic():
+    a, b = ThompsonSamplingBandit.update_from_critic(
+        1.0, 1.0, critic_score=9.0, weight=0.3, threshold=7.0
+    )
+    assert a == pytest.approx(1.3)
+    assert b == pytest.approx(1.0)
+
+    a, b = ThompsonSamplingBandit.update_from_critic(
+        1.0, 1.0, critic_score=0.0, weight=0.3, threshold=7.0
+    )
+    assert a == pytest.approx(1.0)
+    assert b == pytest.approx(1.3)
+
+
+def test_expected_value():
+    assert expected_value(3.0, 1.0) == 0.75
+
+
+def test_action_payload():
+    action = Arm("storytelling", "email").to_action()
+    assert action["prompt_style"] == "storytelling"
+    assert action["max_revision_rounds"] == 2
+    assert "temperature" in action

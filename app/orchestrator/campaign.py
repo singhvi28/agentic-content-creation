@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,13 +10,13 @@ from app.bandit.thompson import ThompsonSamplingBandit
 from app.config import get_settings
 from app.db.models import ContentVersion, Job, JobStatus, Platform
 from app.llm.gemini import LLMClient
-from app.orchestrator.pipeline import (
+from app.orchestrator.helpers import (
     StatusCallback,
-    _critique_and_maybe_revise,
-    _ensure_arm_row,
-    _load_bandit_params,
-    _set_status,
-    _soft_update_bandit,
+    critique_and_maybe_revise,
+    ensure_arm_row,
+    load_bandit_params,
+    set_status,
+    soft_update_bandit,
 )
 from app.orchestrator.prompts import (
     campaign_plan_prompt,
@@ -49,7 +48,7 @@ async def run_campaign_pipeline(
     if not platforms:
         raise ValueError("Campaign job has no platforms")
 
-    await _set_status(session, job, JobStatus.planning, on_status, {"platforms": platforms})
+    await set_status(session, job, JobStatus.planning, on_status, {"platforms": platforms})
     shared_plan = await llm.generate(
         campaign_plan_prompt(job.brief, platforms),
         temperature=0.5,
@@ -66,13 +65,13 @@ async def run_campaign_pipeline(
     used_arm_ids: list[str] = []
 
     for platform in platforms:
-        params = await _load_bandit_params(session, platform)
+        params = await load_bandit_params(session, platform)
         arm = bandit.select_arm(platform, params)
         action = arm.to_action()
-        await _ensure_arm_row(session, arm.arm_id)
+        await ensure_arm_row(session, arm.arm_id)
         used_arm_ids.append(arm.arm_id)
 
-        await _set_status(
+        await set_status(
             session,
             job,
             JobStatus.drafting,
@@ -109,7 +108,7 @@ async def run_campaign_pipeline(
         max_rounds = int(
             action.get("max_revision_rounds", settings.max_revision_rounds)
         )
-        final_version = await _critique_and_maybe_revise(
+        final_version = await critique_and_maybe_revise(
             session,
             job,
             llm,
@@ -123,8 +122,7 @@ async def run_campaign_pipeline(
         )
         final_assets[platform] = final_version
 
-    # Cross-surface critic
-    await _set_status(session, job, JobStatus.critiquing, on_status, {"phase": "cross_surface"})
+    await set_status(session, job, JobStatus.critiquing, on_status, {"phase": "cross_surface"})
     asset_texts = {p: v.text for p, v in final_assets.items()}
     cross = await llm.generate_json(
         cross_surface_critique_prompt(job.brief, asset_texts)
@@ -141,7 +139,7 @@ async def run_campaign_pipeline(
 
     cross_weight = settings.critic_reward_weight * 0.5
     for arm_id in used_arm_ids:
-        await _soft_update_bandit(
+        await soft_update_bandit(
             session,
             arm_id,
             score,
@@ -159,10 +157,8 @@ async def run_campaign_pipeline(
     )
 
     pack_md = _pack_markdown(asset_texts, shared_plan)
-    # Prefer leaving final_content_id null; API builds pack from assets.
-    # Store pack text on a synthetic last touch via error_message? No — use final_content in response only.
     job.final_content_id = None
-    await _set_status(
+    await set_status(
         session,
         job,
         JobStatus.done,

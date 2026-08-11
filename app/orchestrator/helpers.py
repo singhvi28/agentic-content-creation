@@ -65,9 +65,12 @@ async def soft_update_bandit(
 ) -> None:
     settings = get_settings()
     row = await ensure_arm_row(session, arm_id)
+    alpha, beta = ThompsonSamplingBandit.apply_decay(
+        row.alpha, row.beta, settings.bandit_decay
+    )
     row.alpha, row.beta = ThompsonSamplingBandit.update_from_critic(
-        row.alpha,
-        row.beta,
+        alpha,
+        beta,
         critic_score,
         weight=settings.critic_reward_weight if weight is None else weight,
         threshold=settings.critic_score_threshold,
@@ -87,6 +90,7 @@ async def critique_and_maybe_revise(
     on_status: StatusCallback,
     platform: str | None = None,
 ) -> ContentVersion:
+    """Critique/revise loop; applies one soft bandit update on the final version."""
     settings = get_settings()
     plat = platform or (job.platform.value if job.platform else None)
     if not plat:
@@ -100,7 +104,6 @@ async def critique_and_maybe_revise(
 
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
-        await soft_update_bandit(session, arm.arm_id, critique.critic_score)
         await session.commit()
         await on_status(
             job.id,
@@ -114,6 +117,8 @@ async def critique_and_maybe_revise(
         )
 
         if critique.critic_score >= settings.critic_score_threshold:
+            await soft_update_bandit(session, arm.arm_id, critique.critic_score)
+            await session.commit()
             return current_version
 
         await set_status(session, job, JobStatus.revising, on_status)
@@ -150,7 +155,12 @@ async def critique_and_maybe_revise(
         critique = await critique_draft(llm, job.brief, plat, current_draft)
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
-        await soft_update_bandit(session, arm.arm_id, critique.critic_score)
+        await session.commit()
+
+    if current_version.critic_score is not None:
+        await soft_update_bandit(
+            session, arm.arm_id, current_version.critic_score
+        )
         await session.commit()
 
     return current_version

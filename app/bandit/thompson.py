@@ -58,13 +58,18 @@ class ThompsonSamplingBandit:
         self,
         platform: str,
         params: Sequence[ArmParams],
+        *,
+        exclude_styles: set[str] | None = None,
     ) -> Arm:
         """Sample θ ~ Beta(α, β) per arm; pick argmax."""
+        excluded = exclude_styles or set()
         by_id = {p.arm_id: p for p in params}
         best_arm: Arm | None = None
         best_theta = -1.0
 
         for arm in self.all_arms_for_context(platform):
+            if arm.prompt_style in excluded:
+                continue
             p = by_id.get(arm.arm_id)
             alpha = p.alpha if p else 1.0
             beta = p.beta if p else 1.0
@@ -73,8 +78,37 @@ class ThompsonSamplingBandit:
                 best_theta = theta
                 best_arm = arm
 
-        assert best_arm is not None
+        if best_arm is None:
+            raise ValueError("no arms available after exclusions")
         return best_arm
+
+    def select_arms_without_replacement(
+        self,
+        platform: str,
+        params: Sequence[ArmParams],
+        k: int,
+    ) -> list[Arm]:
+        """Thompson-sample k distinct prompt styles for the platform."""
+        if k < 1:
+            raise ValueError("k must be >= 1")
+        if k > len(PROMPT_STYLES):
+            raise ValueError(
+                f"k={k} exceeds available styles ({len(PROMPT_STYLES)})"
+            )
+        chosen: list[Arm] = []
+        excluded: set[str] = set()
+        for _ in range(k):
+            arm = self.select_arm(platform, params, exclude_styles=excluded)
+            chosen.append(arm)
+            excluded.add(arm.prompt_style)
+        return chosen
+
+    @staticmethod
+    def apply_decay(
+        alpha: float, beta: float, decay: float = 0.995
+    ) -> tuple[float, float]:
+        """Pull posteriors toward Beta(1,1) so old evidence fades."""
+        return 1.0 + (alpha - 1.0) * decay, 1.0 + (beta - 1.0) * decay
 
     @staticmethod
     def update_from_rating(alpha: float, beta: float, rating: int) -> tuple[float, float]:

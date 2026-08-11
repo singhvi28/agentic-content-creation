@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bandit.thompson import PROMPT_STYLES, Arm, ThompsonSamplingBandit, expected_value
+from app.config import get_settings
 from app.db.models import (
     BanditState,
     ContentVersion,
@@ -38,13 +39,17 @@ async def seed_bandit_arms(session: AsyncSession) -> None:
 
 
 async def _bump_arm(session: AsyncSession, arm_id: str, rating: int) -> None:
+    settings = get_settings()
     row = await session.get(BanditState, arm_id)
     if row is None:
         row = BanditState(arm_id=arm_id, alpha=1.0, beta=1.0)
         session.add(row)
         await session.flush()
+    alpha, beta = ThompsonSamplingBandit.apply_decay(
+        row.alpha, row.beta, settings.bandit_decay
+    )
     row.alpha, row.beta = ThompsonSamplingBandit.update_from_rating(
-        row.alpha, row.beta, rating
+        alpha, beta, rating
     )
 
 

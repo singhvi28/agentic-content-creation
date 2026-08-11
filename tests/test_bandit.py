@@ -60,6 +60,27 @@ def test_update_from_critic():
     assert b == pytest.approx(1.3)
 
 
+def test_apply_decay():
+    a, b = ThompsonSamplingBandit.apply_decay(5.0, 3.0, decay=0.5)
+    assert a == pytest.approx(3.0)
+    assert b == pytest.approx(2.0)
+    # Prior Beta(1,1) is a fixed point
+    assert ThompsonSamplingBandit.apply_decay(1.0, 1.0, 0.995) == (1.0, 1.0)
+
+
+def test_select_arms_without_replacement_distinct():
+    params = [
+        ArmParams(f"{s}|linkedin", alpha=1.0, beta=1.0) for s in PROMPT_STYLES
+    ]
+    bandit = ThompsonSamplingBandit(rng=default_rng(7))
+    for k in (2, 3):
+        arms = bandit.select_arms_without_replacement("linkedin", params, k)
+        assert len(arms) == k
+        styles = {a.prompt_style for a in arms}
+        assert len(styles) == k
+        assert all(a.platform == "linkedin" for a in arms)
+
+
 def test_expected_value():
     assert expected_value(3.0, 1.0) == 0.75
 

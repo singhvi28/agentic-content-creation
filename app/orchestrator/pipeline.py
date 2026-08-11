@@ -66,9 +66,15 @@ async def _run_ab_phase_a(
         session, job, JobStatus.drafting, on_status, {"ab_variants": n}
     )
 
-    for i in range(n):
-        params = await load_bandit_params(session, platform)
-        arm = bandit.select_arm(platform, params)
+    params = await load_bandit_params(session, platform)
+    arms = bandit.select_arms_without_replacement(platform, params, n)
+    logger.info(
+        "A/B job %s arms=%s",
+        job.id,
+        [a.arm_id for a in arms],
+    )
+
+    for i, arm in enumerate(arms):
         action = arm.to_action()
         await ensure_arm_row(session, arm.arm_id)
 

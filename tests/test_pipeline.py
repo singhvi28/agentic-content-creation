@@ -89,6 +89,7 @@ async def test_feedback_updates_bandit(session: AsyncSession):
     arm_id = version.bandit_action["arm_id"]
     before = await session.get(BanditState, arm_id)
     alpha_before = before.alpha
+    beta_before = before.beta
 
     await record_feedback(
         session,
@@ -99,8 +100,8 @@ async def test_feedback_updates_bandit(session: AsyncSession):
         scope=FeedbackScope.asset,
     )
     after = await session.get(BanditState, arm_id)
-    assert after.alpha == alpha_before + 1.0
-
+    decayed_a, _ = ThompsonSamplingBandit.apply_decay(alpha_before, beta_before)
+    assert after.alpha == pytest.approx(decayed_a + 1.0)
 
 @pytest.mark.asyncio
 async def test_campaign_pipeline_and_pack_feedback(session: AsyncSession):
@@ -147,7 +148,7 @@ async def test_campaign_pipeline_and_pack_feedback(session: AsyncSession):
     before = {}
     for arm_id in arm_ids:
         row = await session.get(BanditState, arm_id)
-        before[arm_id] = row.alpha
+        before[arm_id] = (row.alpha, row.beta)
 
     await record_feedback(
         session,
@@ -156,10 +157,10 @@ async def test_campaign_pipeline_and_pack_feedback(session: AsyncSession):
         edited_text=None,
         scope=FeedbackScope.pack,
     )
-    for arm_id, alpha0 in before.items():
+    for arm_id, (alpha0, beta0) in before.items():
         row = await session.get(BanditState, arm_id)
-        assert row.alpha == alpha0 + 1.0
-
+        decayed_a, _ = ThompsonSamplingBandit.apply_decay(alpha0, beta0)
+        assert row.alpha == pytest.approx(decayed_a + 1.0)
 
 @pytest.mark.asyncio
 async def test_ab_pipeline_pauses_then_resumes(session: AsyncSession):
@@ -193,6 +194,8 @@ async def test_ab_pipeline_pauses_then_resumes(session: AsyncSession):
     variants = [v for v in job.versions if v.variant_index is not None]
     assert len(variants) == 2
     assert all("Hook variant" in v.text for v in variants)
+    arm_ids = {(v.bandit_action or {}).get("arm_id") for v in variants}
+    assert len(arm_ids) == 2
 
     # Worker re-entry without choice is a no-op
     await run_pipeline(session, job.id, llm, bandit=bandit)
@@ -263,7 +266,9 @@ async def test_apply_ab_choice_bandit_pairwise(session: AsyncSession):
 
     w_after = await session.get(BanditState, arm_w)
     l_after = await session.get(BanditState, arm_l)
-    assert w_after.alpha == w_a + 1.0
-    assert w_after.beta == w_b
-    assert l_after.alpha == l_a
-    assert l_after.beta == l_b + 1.0
+    decayed_wa, decayed_wb = ThompsonSamplingBandit.apply_decay(w_a, w_b)
+    decayed_la, decayed_lb = ThompsonSamplingBandit.apply_decay(l_a, l_b)
+    assert w_after.alpha == pytest.approx(decayed_wa + 1.0)
+    assert w_after.beta == pytest.approx(decayed_wb)
+    assert l_after.alpha == pytest.approx(decayed_la)
+    assert l_after.beta == pytest.approx(decayed_lb + 1.0)

@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     cursor_cwd: str = "."
     # Secondary bandit update weight from automated critic (0–1 scale mapped to soft update)
     critic_reward_weight: float = 0.3
+    # Forget factor applied before each posterior write so exploration does not freeze
+    bandit_decay: float = 0.995
     max_revision_rounds: int = 2
     # When true, worker uses FakeLLMClient (no external LLM calls)
     use_fake_llm: bool = False

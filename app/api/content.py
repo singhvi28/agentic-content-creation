@@ -2,7 +2,7 @@ import uuid
 
 from arq import create_pool
 from arq.connections import ArqRedis
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,7 +25,6 @@ from app.schemas import (
     JobDetailResponse,
 )
 from app.services.bandit_service import record_feedback
-from app.services.events import hub
 from app.worker.tasks import redis_settings_from_url
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -253,19 +252,3 @@ async def submit_feedback(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return FeedbackResponse(ok=True)
-
-
-@router.websocket("/{job_id}/stream")
-async def stream_job(websocket: WebSocket, job_id: uuid.UUID) -> None:
-    await websocket.accept()
-    await hub.subscribe(job_id, websocket)
-    try:
-        await websocket.send_json(
-            {"job_id": str(job_id), "status": "subscribed"}
-        )
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await hub.unsubscribe(job_id, websocket)

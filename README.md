@@ -49,7 +49,7 @@ Client
   │                                                └─ Persist versions + soft bandit update
   │
   ├─ GET  /content/{id}          ◄── poll status + versions
-  ├─ WS   /content/{id}/stream   ◄── Redis pub/sub status events
+  ├─ POST /content/{id}/choose   ──► A/B winner (single jobs)
   ├─ POST /content/{id}/feedback ──► update Beta(α, β) for the arm used
   └─ GET  /bandit/stats          ◄── current posteriors per arm
 ```
@@ -109,7 +109,6 @@ arq app.worker.tasks.WorkerSettings
 |--------|------|---------|
 | `POST` | `/content/generate` | Enqueue single or campaign job |
 | `GET` | `/content/{job_id}` | Job status, versions, assets, variants, final content |
-| `WS` | `/content/{job_id}/stream` | Status + draft events |
 | `POST` | `/content/{job_id}/choose` | Pick A/B hook winner → resume critique/revise |
 | `POST` | `/content/{job_id}/feedback` | Asset or pack rating → bandit update |
 | `GET` | `/bandit/stats` | α/β (and mean) per arm |
@@ -202,7 +201,7 @@ app/
   llm/           # Cursor + Gemini clients + FakeLLMClient
   orchestrator/  # Pipeline state machine + evaluator + prompts
   platforms.py   # Platform presets (caps, tone, CTA, format)
-  services/      # Bandit persistence + Redis event hub
+  services/      # Bandit persistence helpers
   worker/        # Arq tasks
 frontend/
   streamlit_app.py
@@ -222,13 +221,13 @@ Honest stretch, not built here:
 - Vector DB / RAG for brand voice and prior examples
 - Dedicated RL / ranking microservice
 - Offline batch retraining + shadow evaluation
-- Token-level WebSocket streaming (today: status + full draft events)
+- Optional live event stream (clients poll `GET /content/{id}` today)
 
 ---
 
 ## Interview talking points
 
 - Scoped to **pipeline-level** decisions, not token-level RL — deliberate given LLM rollout cost.
-- Thompson Sampling explores naturally and decays exploration as posteriors concentrate (vs ε-greedy).
-- Critic mixes **LLM rubric** with **free local signals** (Flesch, n-gram overlap, platform length).
-- Worker and API are separate processes; progress streams via **Redis pub/sub**.
+- Thompson Sampling explores naturally; posteriors use a forget-factor decay so exploration does not freeze permanently.
+- Critic mixes **LLM rubric** with **free local signals** (Flesch, n-gram overlap, platform length); critic is a secondary bandit signal vs human/A/B.
+- Worker and API are separate processes; job progress is read by **polling** Postgres status.

@@ -62,14 +62,11 @@ async def client():
     with patch("app.api.content.get_arq_pool", AsyncMock(return_value=mock_pool)):
         with patch("app.main.init_db", AsyncMock()):
             with patch("app.main.seed_bandit_arms", AsyncMock()):
-                with patch("app.main.hub") as mock_hub:
-                    mock_hub.connect = AsyncMock()
-                    mock_hub.close = AsyncMock()
-                    transport = ASGITransport(app=app)
-                    async with AsyncClient(
-                        transport=transport, base_url="http://test"
-                    ) as ac:
-                        yield ac
+                transport = ASGITransport(app=app)
+                async with AsyncClient(
+                    transport=transport, base_url="http://test"
+                ) as ac:
+                    yield ac
 
     app.dependency_overrides.clear()
     await engine.dispose()

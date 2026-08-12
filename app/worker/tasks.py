@@ -14,7 +14,6 @@ from app.db.session import AsyncSessionLocal
 from app.llm.cursor import CursorLLMClient
 from app.llm.gemini import FakeLLMClient, GeminiClient
 from app.orchestrator.pipeline import run_pipeline
-from app.services.events import hub
 
 logger = logging.getLogger(__name__)
 
@@ -52,17 +51,15 @@ def build_llm():
 
 
 async def run_content_job(ctx: dict, job_id: str) -> None:
-    """Arq task entrypoint."""
+    """Arq task entrypoint. Status is persisted to Postgres; clients poll GET."""
     jid = uuid.UUID(job_id)
     llm = build_llm()
 
     async def on_status(
         job_uuid: uuid.UUID, status: JobStatus, payload: dict | None = None
     ) -> None:
-        event = {"job_id": str(job_uuid), "status": status.value}
-        if payload:
-            event["payload"] = payload
-        await hub.publish(job_uuid, event)
+        # Status already committed by set_status; keep hook for future metrics.
+        _ = (job_uuid, status, payload)
 
     async with AsyncSessionLocal() as session:
         try:

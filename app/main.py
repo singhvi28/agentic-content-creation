@@ -7,7 +7,6 @@ from app.api import bandit, content
 from app.api.content import close_arq_pool
 from app.db.session import AsyncSessionLocal, init_db
 from app.services.bandit_service import seed_bandit_arms
-from app.services.events import hub
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,9 +19,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     async with AsyncSessionLocal() as session:
         await seed_bandit_arms(session)
-    await hub.connect()
     yield
-    await hub.close()
     await close_arq_pool()
 
 

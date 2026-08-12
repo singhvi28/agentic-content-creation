@@ -91,6 +91,9 @@ pip install -r requirements.txt
 # Ensure Postgres DB exists, e.g.:
 # createdb content_pipeline
 
+# Apply schema migrations (Alembic)
+python scripts/migrate.py
+
 # Terminal 1 — API
 uvicorn app.main:app --reload --port 8000
 

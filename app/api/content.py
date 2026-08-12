@@ -204,6 +204,11 @@ async def choose_variant(
             status_code=400,
             detail="Job is not awaiting an A/B choice",
         )
+    if job.chosen_version_id is not None or job.ab_choice_applied_at is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="A/B winner already chosen for this job",
+        )
 
     winner = next(
         (v for v in job.versions if v.id == body.content_version_id), None

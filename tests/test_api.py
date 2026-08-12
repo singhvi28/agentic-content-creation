@@ -17,7 +17,7 @@ from app.services.bandit_service import seed_bandit_arms
 @pytest_asyncio.fixture
 async def client():
     engine = create_async_engine(
-        "sqlite+aiosqlite:///file:apitest_ab?mode=memory&cache=shared",
+        "sqlite+aiosqlite:///file:apitest_idem?mode=memory&cache=shared",
         connect_args={"uri": True},
     )
     async with engine.begin() as conn:

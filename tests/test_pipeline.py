@@ -272,3 +272,63 @@ async def test_apply_ab_choice_bandit_pairwise(session: AsyncSession):
     assert w_after.beta == pytest.approx(decayed_wb)
     assert l_after.alpha == pytest.approx(decayed_la)
     assert l_after.beta == pytest.approx(decayed_lb + 1.0)
+
+
+@pytest.mark.asyncio
+async def test_ab_choice_bandit_applied_only_once(session: AsyncSession):
+    """Re-running phase B must not double-count pairwise bandit updates."""
+    from app.db.models import ContentVersion
+
+    job = Job(
+        brief="Idempotent A/B resume.",
+        job_type=JobType.single,
+        platform=Platform.linkedin,
+        ab_variants=2,
+        status=JobStatus.queued,
+    )
+    session.add(job)
+    await session.commit()
+
+    llm = FakeLLMClient()
+    bandit = ThompsonSamplingBandit(rng=default_rng(19))
+    await run_pipeline(session, job.id, llm, bandit=bandit)
+
+    await session.refresh(job)
+    assert job.status == JobStatus.awaiting_choice
+
+    variants = (
+        await session.execute(
+            select(ContentVersion)
+            .where(ContentVersion.job_id == job.id)
+            .where(ContentVersion.variant_index.is_not(None))
+            .order_by(ContentVersion.variant_index)
+        )
+    ).scalars().all()
+    assert len(variants) == 2
+    winner = variants[0]
+    loser = variants[1]
+    winner_arm = winner.bandit_action["arm_id"]
+    loser_arm = loser.bandit_action["arm_id"]
+
+    job.chosen_version_id = winner.id
+    job.status = JobStatus.queued
+    await session.commit()
+
+    await run_pipeline(session, job.id, llm, bandit=bandit)
+    await session.refresh(job)
+    assert job.status == JobStatus.done
+    assert job.ab_choice_applied_at is not None
+
+    l_after_first = await session.get(BanditState, loser_arm)
+    l_a, l_b = l_after_first.alpha, l_after_first.beta
+
+    # Simulate Arq retry while still mid-resume (choice already applied)
+    job.status = JobStatus.queued
+    job.final_content_id = None
+    await session.commit()
+    await run_pipeline(session, job.id, llm, bandit=bandit)
+
+    # Loser arm is only touched by pairwise choose — must not bump again
+    l_after = await session.get(BanditState, loser_arm)
+    assert l_after.alpha == pytest.approx(l_a)
+    assert l_after.beta == pytest.approx(l_b)

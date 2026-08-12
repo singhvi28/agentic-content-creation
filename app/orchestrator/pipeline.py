@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -133,8 +134,10 @@ async def _run_ab_phase_b(
     if winner.variant_index is None:
         raise ValueError("chosen version is not an A/B variant")
 
-    await apply_ab_choice(session, job, winner.id)
-    await session.commit()
+    if job.ab_choice_applied_at is None:
+        await apply_ab_choice(session, job, winner.id)
+        job.ab_choice_applied_at = datetime.now(timezone.utc)
+        await session.commit()
 
     action = winner.bandit_action or {}
     arm_id = action.get("arm_id")
@@ -280,6 +283,10 @@ async def run_pipeline(
     job = result.scalar_one_or_none()
     if job is None:
         raise ValueError(f"Job {job_id} not found")
+
+    if job.status == JobStatus.done:
+        logger.info("Job %s already done; skipping", job_id)
+        return
 
     try:
         if job.job_type == JobType.campaign:

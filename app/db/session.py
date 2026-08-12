@@ -109,6 +109,7 @@ async def _migrate_campaign_columns(conn) -> None:
 async def _migrate_ab_columns(conn) -> None:
     await _add_column_if_missing(conn, "jobs", "ab_variants", "INTEGER")
     await _add_column_if_missing(conn, "jobs", "chosen_version_id", "CHAR(36)")
+    await _add_column_if_missing(conn, "jobs", "ab_choice_applied_at", "TIMESTAMP")
     await _add_column_if_missing(conn, "content_versions", "variant_index", "INTEGER")
 
 

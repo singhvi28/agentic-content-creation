@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,42 +49,52 @@ async def run_campaign_pipeline(
     if not platforms:
         raise ValueError("Campaign job has no platforms")
 
-    await set_status(session, job, JobStatus.planning, on_status, {"platforms": platforms})
+    await set_status(
+        session, job, JobStatus.planning, on_status, {"platforms": platforms}
+    )
     shared_plan = await llm.generate(
         campaign_plan_prompt(job.brief, platforms),
         temperature=0.5,
     )
     job.shared_plan = shared_plan
     await session.commit()
-    await on_status(
-        job.id,
-        JobStatus.planning,
-        {"shared_plan": shared_plan},
-    )
+    await on_status(job.id, JobStatus.planning, {"shared_plan": shared_plan})
 
-    final_assets: dict[str, ContentVersion] = {}
-    used_arm_ids: list[str] = []
-
+    # Select arms sequentially (shared RNG / bandit rows)
+    planned: list[tuple[str, object, dict]] = []
     for platform in platforms:
         params = await load_bandit_params(session, platform)
         arm = bandit.select_arm(platform, params)
         action = arm.to_action()
         await ensure_arm_row(session, arm.arm_id)
-        used_arm_ids.append(arm.arm_id)
+        planned.append((platform, arm, action))
 
-        await set_status(
-            session,
-            job,
-            JobStatus.drafting,
-            on_status,
-            {"platform": platform, "arm": action},
-        )
-        draft = await llm.generate(
-            draft_from_shared_plan_prompt(
-                job.brief, platform, arm.prompt_style, shared_plan
-            ),
-            temperature=float(action["temperature"]),
-        )
+    await set_status(
+        session,
+        job,
+        JobStatus.drafting,
+        on_status,
+        {"platforms": platforms, "parallel_drafts": True},
+    )
+
+    # Parallel LLM drafts only — one shared session for persistence
+    drafts = await asyncio.gather(
+        *[
+            llm.generate(
+                draft_from_shared_plan_prompt(
+                    job.brief, platform, arm.prompt_style, shared_plan
+                ),
+                temperature=float(action["temperature"]),
+            )
+            for platform, arm, action in planned
+        ]
+    )
+
+    final_assets: dict[str, ContentVersion] = {}
+    used_arm_ids: list[str] = []
+
+    for (platform, arm, action), draft in zip(planned, drafts):
+        used_arm_ids.append(arm.arm_id)
         version = ContentVersion(
             job_id=job.id,
             platform=Platform(platform),
@@ -122,7 +133,9 @@ async def run_campaign_pipeline(
         )
         final_assets[platform] = final_version
 
-    await set_status(session, job, JobStatus.critiquing, on_status, {"phase": "cross_surface"})
+    await set_status(
+        session, job, JobStatus.critiquing, on_status, {"phase": "cross_surface"}
+    )
     asset_texts = {p: v.text for p, v in final_assets.items()}
     cross = await llm.generate_json(
         cross_surface_critique_prompt(job.brief, asset_texts)

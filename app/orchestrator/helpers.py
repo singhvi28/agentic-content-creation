@@ -116,15 +116,27 @@ async def critique_and_maybe_revise(
             },
         )
 
-        if critique.critic_score >= settings.critic_score_threshold:
+        if (
+            critique.critic_score >= settings.critic_score_threshold
+            and critique.length_score >= 8.0
+        ):
             await soft_update_bandit(session, arm.arm_id, critique.critic_score)
             await session.commit()
             return current_version
 
+        length_note = ""
+        if critique.length_score < 8.0:
+            length_note = (
+                " Also shorten to fit the platform length cap "
+                f"(length_score={critique.length_score})."
+            )
         await set_status(session, job, JobStatus.revising, on_status)
         current_draft = await llm.generate(
             revise_prompt(
-                job.brief, current_draft, critique.critic_notes, platform=plat
+                job.brief,
+                current_draft,
+                critique.critic_notes + length_note,
+                platform=plat,
             ),
             temperature=float(action["temperature"]),
         )

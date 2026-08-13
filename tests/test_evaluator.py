@@ -14,9 +14,15 @@ def test_combine_scores_bounds():
 
 
 def test_flesch_mapping():
-    assert flesch_to_0_10(100) == 10.0
+    # Target band 50–70 scores 10
+    assert flesch_to_0_10(60) == 10.0
+    assert flesch_to_0_10(50) == 10.0
+    assert flesch_to_0_10(70) == 10.0
+    # Outside band tapers
     assert flesch_to_0_10(0) == 0.0
-    assert flesch_to_0_10(50) == 5.0
+    assert flesch_to_0_10(100) == 0.0
+    assert flesch_to_0_10(25) == 5.0
+    assert flesch_to_0_10(85) == 5.0
 
 
 def test_ngram_overlap_detects_repetition():

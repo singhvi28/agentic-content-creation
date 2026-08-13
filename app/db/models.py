@@ -112,7 +112,7 @@ class Job(Base):
         "ContentVersion",
         back_populates="job",
         foreign_keys="ContentVersion.job_id",
-        order_by="ContentVersion.round",
+        order_by="ContentVersion.round, ContentVersion.variant_index, ContentVersion.created_at",
     )
     feedback_items: Mapped[list["Feedback"]] = relationship(
         "Feedback", back_populates="job"

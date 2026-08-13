@@ -69,10 +69,11 @@ def _latest_assets(job: Job) -> list[CampaignAssetOut]:
 
 def _ab_variants(job: Job) -> list[AbVariantOut]:
     variants: list[AbVariantOut] = []
-    for v in sorted(
+    ordered = sorted(
         [x for x in job.versions if x.variant_index is not None],
-        key=lambda x: x.variant_index or 0,
-    ):
+        key=lambda x: (x.variant_index or 0, str(x.created_at), str(x.id)),
+    )
+    for v in ordered:
         variants.append(
             AbVariantOut(
                 version_id=v.id,

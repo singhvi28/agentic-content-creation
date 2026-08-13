@@ -24,9 +24,21 @@ class CritiqueResult:
 
 
 def flesch_to_0_10(flesch: float) -> float:
-    """Map Flesch Reading Ease (~0–100) to 0–10."""
+    """
+    Map Flesch Reading Ease to 0–10 with a target band.
+
+    Scores in roughly 50–70 (plain adult prose) get 10; taper outside so
+    maximally simplistic (~100) and dense (~0) writing are not rewarded.
+    """
     clamped = max(0.0, min(100.0, flesch))
-    return round(clamped / 10.0, 2)
+    low, high = 50.0, 70.0
+    if low <= clamped <= high:
+        return 10.0
+    if clamped < low:
+        # 0 → 0, 50 → 10
+        return round(10.0 * (clamped / low), 2)
+    # 70 → 10, 100 → 0
+    return round(10.0 * (1.0 - (clamped - high) / (100.0 - high)), 2)
 
 
 def ngram_overlap_ratio(text: str, n: int = 3) -> float:

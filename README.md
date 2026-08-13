@@ -186,11 +186,14 @@ pytest -q
 
 Coverage includes:
 
-- Seeded-RNG bandit unit tests (determinism, preference for high-α arms, reward updates)
-- Evaluator local metrics (Flesch, n-gram repetition, platform length caps)
-- Orchestrator with `FakeLLMClient`
+- Seeded-RNG bandit unit tests (determinism, preference for high-α arms, decay, without-replacement A/B arms)
+- Evaluator local metrics (Flesch target band, n-gram repetition, platform length caps)
+- Orchestrator with `FakeLLMClient` (single, campaign, A/B idempotent resume)
 - API flow: generate → poll → feedback → `/bandit/stats` (21 arms)
 - A/B variants: generate → `awaiting_choice` → `/choose` → done + pairwise bandit update
+- IP rate limit `429` + `llm_usage` logging via `LoggingLLMClient`
+
+Schema changes: run `python scripts/migrate.py` (Alembic). Tests use `create_all` on SQLite and do not require Alembic.
 
 ---
 
@@ -201,11 +204,13 @@ app/
   api/           # FastAPI routers
   bandit/        # Thompson Sampling (~150 lines)
   db/            # SQLAlchemy models + async session
-  llm/           # Cursor + Gemini clients + FakeLLMClient
-  orchestrator/  # Pipeline state machine + evaluator + prompts
+  llm/           # Cursor + Gemini + FakeLLM + LoggingLLMClient
+  middleware/    # IP rate limit
+  orchestrator/  # Pipeline helpers + campaign + evaluator + prompts
   platforms.py   # Platform presets (caps, tone, CTA, format)
   services/      # Bandit persistence helpers
   worker/        # Arq tasks
+alembic/         # Schema migrations (scripts/migrate.py)
 frontend/
   streamlit_app.py
 tests/

@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.api import bandit, content
 from app.api.content import close_arq_pool
 from app.db.session import AsyncSessionLocal, init_db
+from app.middleware.rate_limit import IPRateLimitMiddleware
 from app.services.bandit_service import seed_bandit_arms
 
 logging.basicConfig(
@@ -32,6 +33,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.add_middleware(IPRateLimitMiddleware)
 
 app.include_router(content.router)
 app.include_router(bandit.router)

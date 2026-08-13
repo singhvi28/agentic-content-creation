@@ -13,6 +13,7 @@ from app.db.models import JobStatus
 from app.db.session import AsyncSessionLocal
 from app.llm.cursor import CursorLLMClient
 from app.llm.gemini import FakeLLMClient, GeminiClient
+from app.llm.logging_client import LoggingLLMClient, current_job_id
 from app.orchestrator.pipeline import run_pipeline
 
 logger = logging.getLogger(__name__)
@@ -34,15 +35,30 @@ def build_llm():
 
     if settings.use_fake_llm or provider == "fake":
         logger.warning("Using FakeLLMClient (no external LLM calls)")
-        return FakeLLMClient()
+        inner = FakeLLMClient()
+        return LoggingLLMClient(
+            inner, provider="fake", model="fake", critic_model="fake"
+        )
 
     if provider == "cursor" or (provider == "auto" and settings.cursor_api_key):
         logger.info("Using CursorLLMClient model=%s", settings.cursor_model)
-        return CursorLLMClient()
+        inner = CursorLLMClient()
+        return LoggingLLMClient(
+            inner,
+            provider="cursor",
+            model=settings.cursor_model,
+            critic_model=settings.cursor_critic_model,
+        )
 
     if provider == "gemini" or (provider == "auto" and settings.gemini_api_key):
         logger.info("Using GeminiClient model=%s", settings.gemini_model)
-        return GeminiClient()
+        inner = GeminiClient()
+        return LoggingLLMClient(
+            inner,
+            provider="gemini",
+            model=settings.gemini_model,
+            critic_model=settings.gemini_critic_model,
+        )
 
     raise RuntimeError(
         "No LLM configured. Set CURSOR_API_KEY or GEMINI_API_KEY, "
@@ -54,19 +70,21 @@ async def run_content_job(ctx: dict, job_id: str) -> None:
     """Arq task entrypoint. Status is persisted to Postgres; clients poll GET."""
     jid = uuid.UUID(job_id)
     llm = build_llm()
+    token = current_job_id.set(jid)
 
     async def on_status(
         job_uuid: uuid.UUID, status: JobStatus, payload: dict | None = None
     ) -> None:
-        # Status already committed by set_status; keep hook for future metrics.
         _ = (job_uuid, status, payload)
 
-    async with AsyncSessionLocal() as session:
-        try:
-            await run_pipeline(session, jid, llm, on_status=on_status)
-        except Exception:
-            logger.exception("Job %s failed", job_id)
-            # pipeline already marks failed; swallow so Arq doesn't retry forever
+    try:
+        async with AsyncSessionLocal() as session:
+            try:
+                await run_pipeline(session, jid, llm, on_status=on_status)
+            except Exception:
+                logger.exception("Job %s failed", job_id)
+    finally:
+        current_job_id.reset(token)
 
 
 async def on_startup(ctx: dict) -> None:

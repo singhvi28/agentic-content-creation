@@ -332,3 +332,44 @@ async def test_ab_choice_bandit_applied_only_once(session: AsyncSession):
     l_after = await session.get(BanditState, loser_arm)
     assert l_after.alpha == pytest.approx(l_a)
     assert l_after.beta == pytest.approx(l_b)
+
+
+@pytest.mark.asyncio
+async def test_logging_llm_records_usage(session: AsyncSession):
+    from unittest.mock import patch
+
+    from app.db.models import LlmUsage
+    from app.llm.logging_client import LoggingLLMClient, current_job_id
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    job = Job(
+        brief="usage log",
+        job_type=JobType.single,
+        platform=Platform.twitter,
+        status=JobStatus.queued,
+    )
+    session.add(job)
+    await session.commit()
+
+    factory = async_sessionmaker(
+        session.bind, class_=AsyncSession, expire_on_commit=False
+    )
+    token = current_job_id.set(job.id)
+    try:
+        llm = LoggingLLMClient(
+            FakeLLMClient(), provider="fake", model="fake", critic_model="fake"
+        )
+        with patch("app.llm.logging_client.AsyncSessionLocal", factory):
+            text = await llm.generate("Write a short tip.", temperature=0.7)
+            assert text
+            data = await llm.generate_json("Score this draft as JSON.")
+            assert "coherence" in data
+    finally:
+        current_job_id.reset(token)
+
+    rows = (
+        await session.execute(select(LlmUsage).where(LlmUsage.job_id == job.id))
+    ).scalars().all()
+    assert len(rows) >= 2
+    assert all(r.estimated_tokens > 0 for r in rows)
+    assert {r.operation for r in rows} >= {"generate", "generate_json"}

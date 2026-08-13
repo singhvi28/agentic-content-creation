@@ -231,3 +231,65 @@ async def test_ab_variants_rejected_on_campaign(client):
         },
     )
     assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_returns_429(monkeypatch):
+    from app.config import get_settings
+    from app.main import app
+
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "2")
+    get_settings.cache_clear()
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///file:apitest_ratelimit?mode=memory&cache=shared",
+        connect_args={"uri": True},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with factory() as s:
+        await seed_bandit_arms(s)
+
+    async def override_get_db():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    app.dependency_overrides[get_db] = override_get_db
+    mock_pool = AsyncMock()
+    mock_pool.enqueue_job = AsyncMock(return_value=None)
+    # Unique IP so prior tests' counters do not interfere
+    headers = {"x-forwarded-for": "203.0.113.50"}
+
+    with patch("app.api.content.get_arq_pool", AsyncMock(return_value=mock_pool)):
+        with patch("app.main.init_db", AsyncMock()):
+            with patch("app.main.seed_bandit_arms", AsyncMock()):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    body = {
+                        "brief": "rate limit me",
+                        "job_type": "single",
+                        "platform": "twitter",
+                    }
+                    assert (
+                        await ac.post("/content/generate", json=body, headers=headers)
+                    ).status_code == 200
+                    assert (
+                        await ac.post("/content/generate", json=body, headers=headers)
+                    ).status_code == 200
+                    limited = await ac.post(
+                        "/content/generate", json=body, headers=headers
+                    )
+                    assert limited.status_code == 429
+                    assert limited.headers.get("retry-after")
+
+    app.dependency_overrides.clear()
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "1000")
+    get_settings.cache_clear()
+    await engine.dispose()

@@ -59,9 +59,12 @@ Client
 - **Arms:** `prompt_style ∈ {concise, storytelling, data_driven}`
 - **Context:** separate Beta posterior per `(prompt_style, platform)` — 21 arms
 - **Select:** sample `θ ~ Beta(α, β)`, pick `argmax`
-- **Human reward:** rating ≥ 4 → `α += 1`; ≤ 2 → `β += 1`; 3 → no-op
-- **Secondary reward:** automated critic score applies a fractional update
-  (`critic_reward_weight`, default 0.3) so the bandit is not blind before feedback
+- **Human reward:** rating ≥ 4 → `α += 1`; ≤ 2 → `β += 1`; 3 → no-op (primary)
+- **A/B choose:** winner arm success, loser arms failure (primary)
+- **Secondary reward:** one soft critic update on the final draft
+  (`critic_reward_weight`, default 0.3), after forget-factor decay on every write
+- **Rate limit:** in-memory per-IP limit on generate/choose/feedback (`RATE_LIMIT_PER_MINUTE`)
+- **Cost:** each LLM call records an `llm_usage` row (char/4 token estimate)
 
 ---
 

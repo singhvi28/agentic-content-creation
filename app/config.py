@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # llm provider: auto | cursor | gemini | fake
     # auto prefers Cursor when CURSOR_API_KEY is set, else Gemini
     llm_provider: str = "auto"
+    # In-memory IP rate limit for generate/choose/feedback (0 disables)
+    rate_limit_per_minute: int = 30
 
 
 @lru_cache

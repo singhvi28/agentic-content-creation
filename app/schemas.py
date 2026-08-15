@@ -4,7 +4,40 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.db.models import FeedbackScope, JobStatus, JobType, Platform
+from app.db.models import (
+    FeedbackScope,
+    JobStatus,
+    JobType,
+    Platform,
+    PromptTemplateStage,
+)
+
+
+class PromptTemplateCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    stage: PromptTemplateStage
+    template: str = Field(..., min_length=1)
+    version_tag: str = Field(default="v1", min_length=1, max_length=64)
+    description: str | None = None
+
+
+class PromptTemplateUpdate(BaseModel):
+    template: str | None = Field(default=None, min_length=1)
+    version_tag: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = None
+
+
+class PromptTemplateOut(BaseModel):
+    id: UUID
+    name: str
+    stage: PromptTemplateStage
+    template: str
+    version_tag: str
+    description: str | None = None
+    is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class GenerateRequest(BaseModel):
@@ -13,6 +46,10 @@ class GenerateRequest(BaseModel):
     platform: Platform | None = None
     include_newsletter: bool = False
     ab_variants: int | None = Field(default=None, ge=2, le=3)
+    prompt_template_id: UUID | None = Field(
+        default=None,
+        description="ID of a saved PromptTemplate to use instead of system defaults.",
+    )
 
     @model_validator(mode="after")
     def validate_job_fields(self) -> Self:
@@ -70,6 +107,8 @@ class JobDetailResponse(BaseModel):
     cross_surface_notes: str | None = None
     ab_variants: int | None = None
     chosen_version_id: UUID | None = None
+    prompt_template_id: UUID | None = None
+    prompt_template: PromptTemplateOut | None = None
     versions: list[ContentVersionOut] = []
     assets: list[CampaignAssetOut] = []
     variants: list[AbVariantOut] = []

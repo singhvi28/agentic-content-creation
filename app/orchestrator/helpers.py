@@ -10,7 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bandit.thompson import Arm, ArmParams, ThompsonSamplingBandit
 from app.config import get_settings
-from app.db.models import BanditState, ContentVersion, Job, JobStatus, Platform
+from app.db.models import (
+    BanditState,
+    ContentVersion,
+    Job,
+    JobStatus,
+    Platform,
+    PromptTemplate,
+    PromptTemplateStage,
+)
 from app.llm.gemini import LLMClient
 from app.orchestrator.evaluator import critique_draft
 from app.orchestrator.prompts import revise_prompt
@@ -89,6 +97,7 @@ async def critique_and_maybe_revise(
     max_rounds: int,
     on_status: StatusCallback,
     platform: str | None = None,
+    prompt_template: PromptTemplate | None = None,
 ) -> ContentVersion:
     """Critique/revise loop; applies one soft bandit update on the final version."""
     settings = get_settings()
@@ -98,9 +107,16 @@ async def critique_and_maybe_revise(
     current_draft = draft
     current_version = version
 
+    pt = prompt_template or getattr(job, "prompt_template", None)
+    revise_override = (
+        pt.template if pt and pt.stage == PromptTemplateStage.revise else None
+    )
+
     for rev_round in range(1, max_rounds + 1):
         await set_status(session, job, JobStatus.critiquing, on_status)
-        critique = await critique_draft(llm, job.brief, plat, current_draft)
+        critique = await critique_draft(
+            llm, job.brief, plat, current_draft, prompt_template=pt
+        )
 
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
@@ -137,6 +153,7 @@ async def critique_and_maybe_revise(
                 current_draft,
                 critique.critic_notes + length_note,
                 platform=plat,
+                override=revise_override,
             ),
             temperature=float(action["temperature"]),
         )
@@ -164,7 +181,9 @@ async def critique_and_maybe_revise(
 
     if current_version.critic_score is None:
         await set_status(session, job, JobStatus.critiquing, on_status)
-        critique = await critique_draft(llm, job.brief, plat, current_draft)
+        critique = await critique_draft(
+            llm, job.brief, plat, current_draft, prompt_template=pt
+        )
         current_version.critic_score = critique.critic_score
         current_version.critic_notes = critique.critic_notes
         await session.commit()

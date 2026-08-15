@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bandit.thompson import ThompsonSamplingBandit
 from app.config import get_settings
-from app.db.models import ContentVersion, Job, JobStatus, Platform
+from app.db.models import (
+    ContentVersion,
+    Job,
+    JobStatus,
+    Platform,
+    PromptTemplateStage,
+)
 from app.llm.gemini import LLMClient
 from app.orchestrator.helpers import (
     StatusCallback,
@@ -49,11 +55,18 @@ async def run_campaign_pipeline(
     if not platforms:
         raise ValueError("Campaign job has no platforms")
 
+    pt = job.prompt_template
+    plan_override = pt.template if pt and pt.stage == PromptTemplateStage.plan else None
+    draft_override = pt.template if pt and pt.stage == PromptTemplateStage.draft else None
+    critique_override = (
+        pt.template if pt and pt.stage == PromptTemplateStage.critique else None
+    )
+
     await set_status(
         session, job, JobStatus.planning, on_status, {"platforms": platforms}
     )
     shared_plan = await llm.generate(
-        campaign_plan_prompt(job.brief, platforms),
+        campaign_plan_prompt(job.brief, platforms, override=plan_override),
         temperature=0.5,
     )
     job.shared_plan = shared_plan
@@ -82,7 +95,11 @@ async def run_campaign_pipeline(
         *[
             llm.generate(
                 draft_from_shared_plan_prompt(
-                    job.brief, platform, arm.prompt_style, shared_plan
+                    job.brief,
+                    platform,
+                    arm.prompt_style,
+                    shared_plan,
+                    override=draft_override,
                 ),
                 temperature=float(action["temperature"]),
             )
@@ -130,6 +147,7 @@ async def run_campaign_pipeline(
             max_rounds,
             on_status,
             platform=platform,
+            prompt_template=pt,
         )
         final_assets[platform] = final_version
 
@@ -138,7 +156,9 @@ async def run_campaign_pipeline(
     )
     asset_texts = {p: v.text for p, v in final_assets.items()}
     cross = await llm.generate_json(
-        cross_surface_critique_prompt(job.brief, asset_texts)
+        cross_surface_critique_prompt(
+            job.brief, asset_texts, override=critique_override
+        )
     )
     consistency = float(cross.get("consistency", 5))
     hook = float(cross.get("hook_alignment", 5))

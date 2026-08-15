@@ -12,7 +12,14 @@ from sqlalchemy.orm import selectinload
 
 from app.bandit.thompson import Arm, ThompsonSamplingBandit
 from app.config import get_settings
-from app.db.models import ContentVersion, Job, JobStatus, JobType
+from app.db.models import (
+    ContentVersion,
+    Job,
+    JobStatus,
+    JobType,
+    PromptTemplate,
+    PromptTemplateStage,
+)
 from app.llm.gemini import LLMClient
 from app.orchestrator.campaign import run_campaign_pipeline
 from app.orchestrator.helpers import (
@@ -39,13 +46,24 @@ async def plan_and_draft(
     platform: str,
     arm: Arm,
     temperature: float,
+    prompt_template: PromptTemplate | None = None,
 ) -> tuple[str, str]:
+    plan_override = (
+        prompt_template.template
+        if prompt_template and prompt_template.stage == PromptTemplateStage.plan
+        else None
+    )
+    draft_override = (
+        prompt_template.template
+        if prompt_template and prompt_template.stage == PromptTemplateStage.draft
+        else None
+    )
     plan = await llm.generate(
-        plan_prompt(brief, platform, arm.prompt_style),
+        plan_prompt(brief, platform, arm.prompt_style, override=plan_override),
         temperature=temperature,
     )
     draft = await llm.generate(
-        draft_prompt(brief, platform, arm.prompt_style, plan),
+        draft_prompt(brief, platform, arm.prompt_style, plan, override=draft_override),
         temperature=temperature,
     )
     return plan, draft
@@ -62,6 +80,11 @@ async def _run_ab_phase_a(
     assert job.platform is not None and job.ab_variants is not None
     platform = job.platform.value
     n = job.ab_variants
+
+    pt = job.prompt_template
+    draft_override = (
+        pt.template if pt and pt.stage == PromptTemplateStage.draft else None
+    )
 
     await set_status(
         session, job, JobStatus.drafting, on_status, {"ab_variants": n}
@@ -81,7 +104,7 @@ async def _run_ab_phase_a(
 
         draft = await llm.generate(
             draft_with_hook_variant_prompt(
-                job.brief, platform, arm.prompt_style, i, n
+                job.brief, platform, arm.prompt_style, i, n, override=draft_override
             ),
             temperature=float(action["temperature"]),
         )
@@ -218,6 +241,7 @@ async def _run_single_pipeline(
         platform,
         arm,
         temperature=float(action["temperature"]),
+        prompt_template=job.prompt_template,
     )
 
     version = ContentVersion(
@@ -250,6 +274,7 @@ async def _run_single_pipeline(
         max_rounds,
         on_status,
         platform=platform,
+        prompt_template=job.prompt_template,
     )
 
     job.final_content_id = final_version.id
@@ -278,7 +303,10 @@ async def run_pipeline(
     result = await session.execute(
         select(Job)
         .where(Job.id == job_id)
-        .options(selectinload(Job.versions))
+        .options(
+            selectinload(Job.versions),
+            selectinload(Job.prompt_template),
+        )
     )
     job = result.scalar_one_or_none()
     if job is None:

@@ -18,7 +18,22 @@ STYLE_INSTRUCTIONS = {
 }
 
 
-def plan_prompt(brief: str, platform: str, prompt_style: str) -> str:
+class _SafeDict(dict):
+    def __missing__(self, key: str) -> str:
+        return f"{{{key}}}"
+
+
+def render_template(template_str: str, **vars) -> str:
+    """Safe {var} substitution for custom prompt templates."""
+    try:
+        return template_str.format_map(_SafeDict(vars))
+    except Exception:
+        return template_str
+
+
+def plan_prompt(
+    brief: str, platform: str, prompt_style: str, *, override: str | None = None
+) -> str:
     style = STYLE_INSTRUCTIONS.get(prompt_style, STYLE_INSTRUCTIONS["concise"])
     preset = get_preset(platform)
     rules = preset_rules_block(preset)
@@ -27,6 +42,16 @@ def plan_prompt(brief: str, platform: str, prompt_style: str) -> str:
         if preset.structure == "thread"
         else "Plan a single piece."
     )
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            platform=platform,
+            prompt_style=prompt_style,
+            style=style,
+            rules=rules,
+            structure_hint=structure_hint,
+        )
     return f"""You are a content strategist. Create a short outline/plan for the following brief.
 
 {rules}
@@ -40,7 +65,14 @@ Brief:
 Return a numbered outline only (5–8 bullets). No draft yet."""
 
 
-def draft_prompt(brief: str, platform: str, prompt_style: str, plan: str) -> str:
+def draft_prompt(
+    brief: str,
+    platform: str,
+    prompt_style: str,
+    plan: str,
+    *,
+    override: str | None = None,
+) -> str:
     style = STYLE_INSTRUCTIONS.get(prompt_style, STYLE_INSTRUCTIONS["concise"])
     preset = get_preset(platform)
     rules = preset_rules_block(preset)
@@ -54,6 +86,18 @@ def draft_prompt(brief: str, platform: str, prompt_style: str, plan: str) -> str
         thread_hint = (
             "Format as a numbered thread (1/, 2/, …). "
             "Respect the per-post character limit strictly."
+        )
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            platform=platform,
+            prompt_style=prompt_style,
+            plan=plan,
+            style=style,
+            rules=rules,
+            format_hint=format_hint,
+            thread_hint=thread_hint,
         )
     return f"""You are a professional content writer. Write the full piece based on the plan.
 
@@ -72,9 +116,19 @@ Plan:
 Return only the finished content — no meta commentary."""
 
 
-def critique_prompt(brief: str, platform: str, draft: str) -> str:
+def critique_prompt(
+    brief: str, platform: str, draft: str, *, override: str | None = None
+) -> str:
     preset = get_preset(platform)
     rules = preset_rules_block(preset)
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            platform=platform,
+            draft=draft,
+            rules=rules,
+        )
     return f"""You are a strict content editor. Score the draft against the brief and platform rules.
 
 Brief:
@@ -93,11 +147,27 @@ Respond with ONLY valid JSON (no markdown fences):
 }}"""
 
 
-def revise_prompt(brief: str, draft: str, notes: str, platform: str | None = None) -> str:
+def revise_prompt(
+    brief: str,
+    draft: str,
+    notes: str,
+    platform: str | None = None,
+    *,
+    override: str | None = None,
+) -> str:
     extra = ""
     if platform:
         preset = get_preset(platform)
         extra = f"\n\nPlatform rules to respect:\n{preset_rules_block(preset)}\n"
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            draft=draft,
+            notes=notes,
+            platform=platform or "",
+            extra=extra,
+        )
     return f"""You are a professional content writer revising a draft.
 {extra}
 Brief:
@@ -112,8 +182,17 @@ Editor feedback:
 Return only the revised full content — no meta commentary."""
 
 
-def campaign_plan_prompt(brief: str, platforms: list[str]) -> str:
+def campaign_plan_prompt(
+    brief: str, platforms: list[str], *, override: str | None = None
+) -> str:
     surfaces = ", ".join(platforms)
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            platforms=surfaces,
+            surfaces=surfaces,
+        )
     return f"""You are a content strategist planning a multi-platform campaign.
 
 Create a shared message plan (style-neutral) that can be adapted to: {surfaces}.
@@ -131,7 +210,12 @@ No platform-specific drafts yet — plan only."""
 
 
 def draft_from_shared_plan_prompt(
-    brief: str, platform: str, prompt_style: str, shared_plan: str
+    brief: str,
+    platform: str,
+    prompt_style: str,
+    shared_plan: str,
+    *,
+    override: str | None = None,
 ) -> str:
     style = STYLE_INSTRUCTIONS.get(prompt_style, STYLE_INSTRUCTIONS["concise"])
     preset = get_preset(platform)
@@ -146,6 +230,18 @@ def draft_from_shared_plan_prompt(
         thread_hint = (
             "Format as a numbered thread (1/, 2/, …). "
             "Respect the per-post character limit strictly."
+        )
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            platform=platform,
+            prompt_style=prompt_style,
+            shared_plan=shared_plan,
+            style=style,
+            rules=rules,
+            format_hint=format_hint,
+            thread_hint=thread_hint,
         )
     return f"""You are a professional content writer adapting a shared campaign plan to one platform.
 
@@ -165,12 +261,18 @@ Return only the finished {preset.label} content — no meta commentary."""
 
 
 def cross_surface_critique_prompt(
-    brief: str, assets: dict[str, str]
+    brief: str, assets: dict[str, str], *, override: str | None = None
 ) -> str:
     blocks = []
     for platform, text in assets.items():
         blocks.append(f"### {platform}\n{text}")
     pack = "\n\n".join(blocks)
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            pack=pack,
+        )
     return f"""You are a brand consistency editor reviewing a multi-platform content pack.
 
 Brief:
@@ -196,6 +298,8 @@ def draft_with_hook_variant_prompt(
     prompt_style: str,
     variant_index: int,
     total: int,
+    *,
+    override: str | None = None,
 ) -> str:
     style = STYLE_INSTRUCTIONS.get(prompt_style, STYLE_INSTRUCTIONS["concise"])
     preset = get_preset(platform)
@@ -210,6 +314,19 @@ def draft_with_hook_variant_prompt(
         thread_hint = (
             "Format as a numbered thread (1/, 2/, …). "
             "Respect the per-post character limit strictly."
+        )
+    if override:
+        return render_template(
+            override,
+            brief=brief,
+            platform=platform,
+            prompt_style=prompt_style,
+            variant_index=variant_index,
+            total=total,
+            style=style,
+            rules=rules,
+            format_hint=format_hint,
+            thread_hint=thread_hint,
         )
     return f"""You are a professional content writer creating an A/B hook variant.
 

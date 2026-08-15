@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import bandit, content
+from app.api import bandit, content, prompts
 from app.api.content import close_arq_pool
 from app.db.session import AsyncSessionLocal, init_db
 from app.middleware.rate_limit import IPRateLimitMiddleware
@@ -37,6 +37,7 @@ app.add_middleware(IPRateLimitMiddleware)
 
 app.include_router(content.router)
 app.include_router(bandit.router)
+app.include_router(prompts.router)
 
 
 @app.get("/health")

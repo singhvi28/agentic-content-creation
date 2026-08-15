@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.campaign_pack import build_campaign_platforms
 from app.config import get_settings
-from app.db.models import Job, JobStatus, JobType
+from app.db.models import Job, JobStatus, JobType, PromptTemplate
 from app.db.session import get_db
 from app.platforms import get_preset
 from app.schemas import (
@@ -23,6 +23,7 @@ from app.schemas import (
     GenerateRequest,
     GenerateResponse,
     JobDetailResponse,
+    PromptTemplateOut,
 )
 from app.services.bandit_service import record_feedback
 from app.worker.tasks import redis_settings_from_url
@@ -108,6 +109,14 @@ async def generate_content(
     body: GenerateRequest,
     db: AsyncSession = Depends(get_db),
 ) -> GenerateResponse:
+    if body.prompt_template_id:
+        pt = await db.get(PromptTemplate, body.prompt_template_id)
+        if pt is None or not pt.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail="Prompt template not found or inactive",
+            )
+
     if body.job_type == JobType.campaign:
         platforms = build_campaign_platforms(body.include_newsletter)
         job = Job(
@@ -116,6 +125,7 @@ async def generate_content(
             platform=None,
             platforms=platforms,
             ab_variants=None,
+            prompt_template_id=body.prompt_template_id,
             status=JobStatus.queued,
         )
     else:
@@ -125,6 +135,7 @@ async def generate_content(
             platform=body.platform,
             platforms=None,
             ab_variants=body.ab_variants,
+            prompt_template_id=body.prompt_template_id,
             status=JobStatus.queued,
         )
     db.add(job)
@@ -145,7 +156,10 @@ async def get_job(
     result = await db.execute(
         select(Job)
         .where(Job.id == job_id)
-        .options(selectinload(Job.versions))
+        .options(
+            selectinload(Job.versions),
+            selectinload(Job.prompt_template),
+        )
     )
     job = result.scalar_one_or_none()
     if job is None:
@@ -165,6 +179,12 @@ async def get_job(
                 final_content = v.text
                 break
 
+    prompt_template_out = (
+        PromptTemplateOut.model_validate(job.prompt_template)
+        if job.prompt_template
+        else None
+    )
+
     return JobDetailResponse(
         job_id=job.id,
         status=job.status,
@@ -177,6 +197,8 @@ async def get_job(
         cross_surface_notes=job.cross_surface_notes,
         ab_variants=job.ab_variants,
         chosen_version_id=job.chosen_version_id,
+        prompt_template_id=job.prompt_template_id,
+        prompt_template=prompt_template_out,
         versions=versions,
         assets=assets,
         variants=variants,

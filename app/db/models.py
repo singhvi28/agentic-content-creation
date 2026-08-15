@@ -56,6 +56,33 @@ class Platform(str, enum.Enum):
     threads = "threads"
 
 
+class PromptTemplateStage(str, enum.Enum):
+    plan = "plan"
+    draft = "draft"
+    revise = "revise"
+    critique = "critique"
+
+
+class PromptTemplate(Base):
+    __tablename__ = "prompt_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    stage: Mapped[PromptTemplateStage] = mapped_column(
+        Enum(PromptTemplateStage, name="prompt_template_stage", native_enum=False),
+        nullable=False,
+    )
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    version_tag: Mapped[str] = mapped_column(String(64), nullable=False, default="v1")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -98,6 +125,11 @@ class Job(Base):
     ab_choice_applied_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    prompt_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("prompt_templates.id"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -116,6 +148,9 @@ class Job(Base):
     )
     feedback_items: Mapped[list["Feedback"]] = relationship(
         "Feedback", back_populates="job"
+    )
+    prompt_template: Mapped["PromptTemplate | None"] = relationship(
+        "PromptTemplate", foreign_keys=[prompt_template_id]
     )
 
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import textstat
 
+from app.db.models import PromptTemplate, PromptTemplateStage
 from app.llm.gemini import LLMClient
 from app.orchestrator.prompts import critique_prompt
 from app.platforms import PlatformPreset, get_preset
@@ -131,9 +132,17 @@ async def critique_draft(
     brief: str,
     platform: str,
     draft: str,
+    prompt_template: PromptTemplate | None = None,
 ) -> CritiqueResult:
     preset = get_preset(platform)
-    llm_result = await llm.generate_json(critique_prompt(brief, platform, draft))
+    override = (
+        prompt_template.template
+        if prompt_template and prompt_template.stage == PromptTemplateStage.critique
+        else None
+    )
+    llm_result = await llm.generate_json(
+        critique_prompt(brief, platform, draft, override=override)
+    )
     coherence = float(llm_result.get("coherence", 5))
     on_topic = float(llm_result.get("on_topic", 5))
     notes = str(llm_result.get("notes", ""))

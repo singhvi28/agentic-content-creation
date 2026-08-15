@@ -293,3 +293,69 @@ async def test_rate_limit_returns_429(monkeypatch):
     monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "1000")
     get_settings.cache_clear()
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_prompt_template_crud_and_override_generation(client):
+    # 1. Create prompt template
+    create_resp = await client.post(
+        "/prompts/",
+        json={
+            "name": "Custom Tech Draft",
+            "stage": "draft",
+            "template": "CUSTOM TEMPLATE DRAFT: {brief} for {platform}",
+            "version_tag": "v1",
+            "description": "Initial draft template",
+        },
+    )
+    assert create_resp.status_code == 201
+    tpl_data = create_resp.json()
+    tpl_id = tpl_data["id"]
+    assert tpl_data["name"] == "Custom Tech Draft"
+    assert tpl_data["version_tag"] == "v1"
+
+    # 2. Immutable Update (bump version)
+    update_resp = await client.patch(
+        f"/prompts/{tpl_id}",
+        json={
+            "template": "UPDATED CUSTOM TEMPLATE DRAFT: {brief} for {platform}",
+        },
+    )
+    assert update_resp.status_code == 200
+    v2_data = update_resp.json()
+    v2_id = v2_data["id"]
+    assert v2_id != tpl_id
+    assert v2_data["version_tag"] == "v2"
+
+    # 3. List prompt templates
+    list_resp = await client.get("/prompts/")
+    assert list_resp.status_code == 200
+    templates = list_resp.json()
+    assert len(templates) >= 2
+
+    # 4. Generate content using the new prompt template version (v2)
+    gen_resp = await client.post(
+        "/content/generate",
+        json={
+            "brief": "AI in healthcare",
+            "job_type": "single",
+            "platform": "twitter",
+            "prompt_template_id": v2_id,
+        },
+    )
+    assert gen_resp.status_code == 200
+    job_id = gen_resp.json()["job_id"]
+
+    # 5. Verify job details and custom template output
+    detail = await client.get(f"/content/{job_id}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["status"] == "done"
+    assert body["prompt_template_id"] == v2_id
+    assert body["prompt_template"]["id"] == v2_id
+    assert body["prompt_template"]["version_tag"] == "v2"
+
+    # Soft delete template
+    del_resp = await client.delete(f"/prompts/{tpl_id}")
+    assert del_resp.status_code == 204
+

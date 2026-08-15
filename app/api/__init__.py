@@ -1,3 +1,3 @@
-from app.api import bandit, content
+from app.api import bandit, content, prompts
 
-__all__ = ["bandit", "content"]
+__all__ = ["bandit", "content", "prompts"]

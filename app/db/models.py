@@ -55,6 +55,18 @@ class Platform(str, enum.Enum):
     instagram = "instagram"
     threads = "threads"
 
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            pseudo_member = cls._value2member_map_.get(value)
+            if pseudo_member is None:
+                pseudo_member = str.__new__(cls, value)
+                pseudo_member._name_ = value.upper()
+                pseudo_member._value_ = value
+                cls._value2member_map_[value] = pseudo_member
+            return pseudo_member
+        return None
+
 
 class PromptTemplateStage(str, enum.Enum):
     plan = "plan"
@@ -130,6 +142,7 @@ class Job(Base):
         ForeignKey("prompt_templates.id"),
         nullable=True,
     )
+    llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

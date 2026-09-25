@@ -373,3 +373,22 @@ async def test_logging_llm_records_usage(session: AsyncSession):
     assert len(rows) >= 2
     assert all(r.estimated_tokens > 0 for r in rows)
     assert {r.operation for r in rows} >= {"generate", "generate_json"}
+
+
+@pytest.mark.asyncio
+async def test_litellm_client():
+    from unittest.mock import AsyncMock, patch
+    from app.llm.litellm_client import LiteLLMClient
+
+    mock_resp = AsyncMock()
+    mock_choice = AsyncMock()
+    mock_choice.message.content = '{"score": 9, "notes": "Great"}'
+    mock_resp.choices = [mock_choice]
+
+    client = LiteLLMClient(model="groq/llama-3.3-70b-versatile", api_key="test-key")
+    with patch("litellm.acompletion", AsyncMock(return_value=mock_resp)):
+        text = await client.generate("test prompt")
+        assert text == '{"score": 9, "notes": "Great"}'
+
+        data = await client.generate_json("test json")
+        assert data["score"] == 9

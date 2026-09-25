@@ -12,6 +12,9 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     cursor_api_key: str = ""
+    groq_api_key: str = ""
+    litellm_model: str = "groq/openai/gpt-oss-20b"
+    litellm_api_key: str = ""
     database_url: str = (
         "postgresql+asyncpg://postgres:postgres@localhost:5432/content_pipeline"
     )

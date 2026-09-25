@@ -16,11 +16,13 @@ from app.services.bandit_service import seed_bandit_arms
 
 @pytest_asyncio.fixture
 async def client():
+    db_name = f"apitest_{uuid.uuid4().hex}"
     engine = create_async_engine(
-        "sqlite+aiosqlite:///file:apitest_idem?mode=memory&cache=shared",
+        f"sqlite+aiosqlite:///file:{db_name}?mode=memory&cache=shared",
         connect_args={"uri": True},
     )
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -53,7 +55,7 @@ async def client():
 
     mock_pool = AsyncMock()
 
-    async def enqueue_job(name, job_id):
+    async def enqueue_job(name, job_id, *args, **kwargs):
         await fake_enqueue(job_id)
         return None
 
@@ -62,9 +64,12 @@ async def client():
     with patch("app.api.content.get_arq_pool", AsyncMock(return_value=mock_pool)):
         with patch("app.main.init_db", AsyncMock()):
             with patch("app.main.seed_bandit_arms", AsyncMock()):
+                test_ip = f"10.99.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
                 transport = ASGITransport(app=app)
                 async with AsyncClient(
-                    transport=transport, base_url="http://test"
+                    transport=transport,
+                    base_url="http://test",
+                    headers={"X-Forwarded-For": test_ip},
                 ) as ac:
                     yield ac
 
@@ -241,11 +246,13 @@ async def test_rate_limit_returns_429(monkeypatch):
     monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "2")
     get_settings.cache_clear()
 
+    db_name = f"apitest_ratelimit_{uuid.uuid4().hex}"
     engine = create_async_engine(
-        "sqlite+aiosqlite:///file:apitest_ratelimit?mode=memory&cache=shared",
+        f"sqlite+aiosqlite:///file:{db_name}?mode=memory&cache=shared",
         connect_args={"uri": True},
     )
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.campaign_pack import build_campaign_platforms
 from app.config import get_settings
-from app.db.models import Job, JobStatus, JobType, PromptTemplate
+from app.db.models import Job, JobStatus, JobType, LlmUsage, PromptTemplate
 from app.db.session import get_db
 from app.platforms import get_preset
 from app.schemas import (
@@ -23,6 +23,9 @@ from app.schemas import (
     GenerateRequest,
     GenerateResponse,
     JobDetailResponse,
+    JobSummaryOut,
+    JobUsageResponse,
+    LlmUsageItem,
     PromptTemplateOut,
 )
 from app.services.bandit_service import record_feedback
@@ -126,6 +129,7 @@ async def generate_content(
             platforms=platforms,
             ab_variants=None,
             prompt_template_id=body.prompt_template_id,
+            llm_model=body.llm_model,
             status=JobStatus.queued,
         )
     else:
@@ -136,6 +140,7 @@ async def generate_content(
             platforms=None,
             ab_variants=body.ab_variants,
             prompt_template_id=body.prompt_template_id,
+            llm_model=body.llm_model,
             status=JobStatus.queued,
         )
     db.add(job)
@@ -143,9 +148,61 @@ async def generate_content(
     await db.refresh(job)
 
     pool = await get_arq_pool()
-    await pool.enqueue_job("run_content_job", str(job.id))
+    await pool.enqueue_job(
+        "run_content_job",
+        str(job.id),
+        body.llm_model,
+        body.llm_api_key,
+        body.llm_critic_model,
+    )
 
     return GenerateResponse(job_id=job.id, status=JobStatus.queued)
+
+
+@router.get("/", response_model=list[JobSummaryOut])
+async def list_jobs(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+) -> list[JobSummaryOut]:
+    result = await db.execute(
+        select(Job).order_by(Job.created_at.desc()).limit(limit).offset(offset)
+    )
+    jobs = result.scalars().all()
+    return [
+        JobSummaryOut(
+            job_id=j.id,
+            created_at=j.created_at,
+            status=j.status,
+            job_type=j.job_type,
+            platform=j.platform,
+            brief=j.brief,
+            ab_variants=j.ab_variants,
+            llm_model=j.llm_model,
+        )
+        for j in jobs
+    ]
+
+
+@router.get("/{job_id}/usage", response_model=JobUsageResponse)
+async def get_job_usage(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> JobUsageResponse:
+    result = await db.execute(
+        select(LlmUsage)
+        .where(LlmUsage.job_id == job_id)
+        .order_by(LlmUsage.created_at.asc())
+    )
+    usages = result.scalars().all()
+    items = [LlmUsageItem.model_validate(u) for u in usages]
+    return JobUsageResponse(
+        job_id=job_id,
+        usages=items,
+        total_prompt_chars=sum(u.prompt_chars for u in items),
+        total_completion_chars=sum(u.completion_chars for u in items),
+        total_estimated_tokens=sum(u.estimated_tokens for u in items),
+    )
 
 
 @router.get("/{job_id}", response_model=JobDetailResponse)
@@ -246,7 +303,7 @@ async def choose_variant(
     await db.commit()
 
     pool = await get_arq_pool()
-    await pool.enqueue_job("run_content_job", str(job.id))
+    await pool.enqueue_job("run_content_job", str(job.id), job.llm_model)
 
     return ChooseResponse(ok=True, status=JobStatus.queued)
 

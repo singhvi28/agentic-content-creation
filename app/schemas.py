@@ -50,6 +50,18 @@ class GenerateRequest(BaseModel):
         default=None,
         description="ID of a saved PromptTemplate to use instead of system defaults.",
     )
+    llm_model: str | None = Field(
+        default=None,
+        description="LiteLLM model string, e.g. 'groq/llama-3.3-70b-versatile', 'openai/gpt-4o-mini'",
+    )
+    llm_api_key: str | None = Field(
+        default=None,
+        description="Client-supplied API key for the chosen LLM provider. Never persisted in DB.",
+    )
+    llm_critic_model: str | None = Field(
+        default=None,
+        description="Optional critic model override.",
+    )
 
     @model_validator(mode="after")
     def validate_job_fields(self) -> Self:
@@ -154,3 +166,57 @@ class ArmStats(BaseModel):
 
 class BanditStatsResponse(BaseModel):
     arms: list[ArmStats]
+
+
+class JobSummaryOut(BaseModel):
+    job_id: UUID
+    created_at: datetime
+    status: JobStatus
+    job_type: JobType
+    platform: Platform | None = None
+    brief: str
+    ab_variants: int | None = None
+    llm_model: str | None = None
+
+
+class LlmUsageItem(BaseModel):
+    id: UUID
+    job_id: UUID | None = None
+    provider: str
+    model: str
+    operation: str
+    prompt_chars: int
+    completion_chars: int
+    estimated_tokens: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class JobUsageResponse(BaseModel):
+    job_id: UUID
+    usages: list[LlmUsageItem] = []
+    total_prompt_chars: int = 0
+    total_completion_chars: int = 0
+    total_estimated_tokens: int = 0
+
+
+class FeedbackItemOut(BaseModel):
+    id: UUID
+    job_id: UUID
+    content_version_id: UUID | None = None
+    scope: FeedbackScope
+    rating: int
+    edited_text: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ResetBanditRequest(BaseModel):
+    arm_id: str | None = None
+
+
+class ResetBanditResponse(BaseModel):
+    ok: bool = True
+    message: str
